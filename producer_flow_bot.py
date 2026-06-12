@@ -33,7 +33,7 @@ def agent(obs, config=None):
 
     candidates = [cand for cand in candidates if cand.score > -20]
     candidates.sort(key=lambda cand: cand.score, reverse=True)
-    candidates = validate_top_candidates(candidates, ctx, limit=80)
+    candidates = validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350)
     return select_moves_greedy(candidates, ctx)
 
 
@@ -66,11 +66,8 @@ def build_context(obs):
 
 def gen_capture_candidates(ctx):
     candidates = []
-    targets = sorted(
-        ctx["neutral_planets"],
-        key=lambda p: (-p.production, p.ships, distance_to_center(p), p.id),
-    )[:14]
     for source in usable_sources(ctx):
+        targets = candidate_targets_for_source(source, ctx["neutral_planets"], global_limit=14)
         for target in targets:
             for ships in ship_buckets(source, target, ctx):
                 cand = score_move(source, target, ships, ctx, "CAPTURE_NEUTRAL")
@@ -81,11 +78,8 @@ def gen_capture_candidates(ctx):
 
 def gen_attack_candidates(ctx):
     candidates = []
-    targets = sorted(
-        ctx["enemy_planets"],
-        key=lambda p: (-p.production, p.ships, distance_to_center(p), p.id),
-    )[:12]
     for source in usable_sources(ctx):
+        targets = candidate_targets_for_source(source, ctx["enemy_planets"], global_limit=12)
         for target in targets:
             for ships in ship_buckets(source, target, ctx):
                 cand = score_move(source, target, ships, ctx, "ATTACK_ENEMY_PRODUCER")
@@ -96,20 +90,33 @@ def gen_attack_candidates(ctx):
 
 def gen_snipe_candidates(ctx):
     candidates = []
-    target_ids = set()
+    opportunities = {}
     for fleet in ctx["enemy_fleets"]:
-        target = nearest_future_hit(fleet, ctx, max_turns=55)
-        if target is not None and target.owner != ctx["player"]:
-            target_ids.add(target.id)
-    for target_id in target_ids:
+        hit = nearest_future_hit(fleet, ctx, max_turns=55)
+        if hit is None:
+            continue
+        target, enemy_eta = hit
+        if target.owner == ctx["player"]:
+            continue
+        before_owner, before_ships = cheap_forecast_target(target, max(0, enemy_eta - 1), ctx)
+        after_owner, after_ships = cheap_forecast_target(target, enemy_eta, ctx)
+        if after_owner == before_owner and after_ships > max(3, target.production * 2):
+            continue
+        current = opportunities.get(target.id)
+        if current is None or enemy_eta < current:
+            opportunities[target.id] = enemy_eta
+    for target_id, enemy_eta in opportunities.items():
         target = ctx["planet_by_id"].get(target_id)
         if target is None:
             continue
         for source in usable_sources(ctx):
             for ships in ship_buckets(source, target, ctx):
                 cand = score_move(source, target, ships, ctx, "SNIPE_CONTESTED")
-                if cand:
-                    candidates.append(cand._replace(score=cand.score + 18))
+                if not cand:
+                    continue
+                if cand.eta < enemy_eta + 1 or cand.eta > enemy_eta + 4:
+                    continue
+                candidates.append(cand._replace(score=cand.score + 18 + max(0, 5 - abs(cand.eta - enemy_eta - 2)) * 3))
     return candidates
 
 
@@ -157,6 +164,34 @@ def usable_sources(ctx):
     )
 
 
+def candidate_targets_for_source(source, targets, global_limit):
+    if not targets:
+        return []
+    selected = []
+    seen = set()
+
+    def add(items):
+        for target in items:
+            if target.id in seen:
+                continue
+            seen.add(target.id)
+            selected.append(target)
+
+    add(sorted(targets, key=lambda p: (-p.production, p.ships, distance_to_center(p), p.id))[:global_limit])
+    add(sorted(targets, key=lambda p: (distance(source, p), p.ships, -p.production, p.id))[:5])
+    add(
+        sorted(
+            targets,
+            key=lambda p: (
+                (int(p.ships) + 1) / max(1, p.production),
+                distance(source, p),
+                p.id,
+            ),
+        )[:5]
+    )
+    return selected
+
+
 def ship_buckets(source, target, ctx):
     arrival0 = estimate_arrival(source, target, max(1, int(target.ships) + 1), ctx)
     predicted_owner, predicted_ships = cheap_forecast_target(target, arrival0, ctx)
@@ -188,6 +223,9 @@ def score_move(source, target, ships, ctx, mission):
     margin = ships - target_ships
     remaining = max(0, ctx["remaining_steps"] - eta)
 
+    if target_owner != ctx["player"] and margin <= 0 and mission != "REINFORCE_THREATENED":
+        return None
+
     if target_owner == ctx["player"]:
         gain = ships * 0.15 + target.production * min(eta, 8)
     elif margin > 0:
@@ -206,9 +244,9 @@ def score_move(source, target, ships, ctx, mission):
     return Candidate(source.id, target.id, int(ships), angle, eta, score, mission)
 
 
-def validate_top_candidates(candidates, ctx, limit=80):
+def validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350):
     valid = []
-    for cand in candidates[:limit]:
+    for cand in candidates[:scan_limit]:
         source = ctx["planet_by_id"].get(cand.source_id)
         target = ctx["planet_by_id"].get(cand.target_id)
         if source is None or target is None:
@@ -218,6 +256,8 @@ def validate_top_candidates(candidates, ctx, limit=80):
         if not path_is_reasonably_safe(source, target, cand.angle, cand.ships, cand.eta, ctx):
             continue
         valid.append(cand)
+        if len(valid) >= valid_limit:
+            break
     return valid
 
 
@@ -251,13 +291,15 @@ def select_moves_greedy(candidates, ctx, max_moves=12):
 
 
 def cheap_forecast_target(target, turns, ctx):
-    ships = int(target.ships)
     owner = target.owner
-    if owner != -1:
-        ships += int(target.production) * max(0, turns)
-    for fleet in ctx["incoming"].get(target.id, []):
-        if fleet["eta"] > turns:
-            continue
+    ships = int(target.ships)
+    last_t = 0
+    arrivals = [item for item in ctx["incoming"].get(target.id, []) if item["eta"] <= turns]
+    arrivals.sort(key=lambda item: item["eta"])
+    for fleet in arrivals:
+        dt = fleet["eta"] - last_t
+        if owner != -1:
+            ships += int(target.production) * max(0, dt)
         if fleet["owner"] == owner:
             ships += fleet["ships"]
         elif fleet["ships"] > ships:
@@ -265,6 +307,9 @@ def cheap_forecast_target(target, turns, ctx):
             ships = fleet["ships"] - ships
         else:
             ships -= fleet["ships"]
+        last_t = fleet["eta"]
+    if owner != -1:
+        ships += int(target.production) * max(0, turns - last_t)
     return owner, max(0, ships)
 
 
@@ -273,16 +318,14 @@ def rough_incoming_by_target(ctx):
     for fleet in ctx["fleets"]:
         hit = nearest_future_hit(fleet, ctx, max_turns=70)
         if hit is not None:
-            eta = estimate_fleet_eta_to_planet(fleet, hit)
-            incoming[hit.id].append({"eta": eta, "owner": fleet.owner, "ships": int(fleet.ships)})
+            target, eta = hit
+            incoming[target.id].append({"eta": eta, "owner": fleet.owner, "ships": int(fleet.ships)})
     for items in incoming.values():
         items.sort(key=lambda item: item["eta"])
     return incoming
 
 
 def nearest_future_hit(fleet, ctx, max_turns=70):
-    best = None
-    best_eta = None
     speed = fleet_speed(fleet.ships)
     x = fleet.x
     y = fleet.y
@@ -292,17 +335,11 @@ def nearest_future_hit(fleet, ctx, max_turns=70):
         y += math.sin(fleet.angle) * speed
         if x < 0 or x > BOARD_SIZE or y < 0 or y > BOARD_SIZE:
             return None
-        for planet in ctx["planets"]:
-            pos = future_planet_position(planet, turn, ctx)
-            if pos is None:
-                continue
-            if point_segment_distance(pos[0], pos[1], prev_x, prev_y, x, y) <= planet.radius:
-                eta = turn
-                if best_eta is None or eta < best_eta:
-                    best = planet
-                    best_eta = eta
-        if best is not None:
-            return best
+        if point_segment_distance(CENTER, CENTER, prev_x, prev_y, x, y) <= SUN_RADIUS:
+            return None
+        first_hit = first_planet_collision(prev_x, prev_y, x, y, turn, ctx)
+        if first_hit is not None:
+            return first_hit, turn
     return None
 
 
@@ -364,11 +401,49 @@ def path_is_reasonably_safe(source, target, angle, ships, eta, ctx):
             return False
         if point_segment_distance(CENTER, CENTER, prev_x, prev_y, x, y) <= SUN_RADIUS + 0.25:
             return False
-        target_pos = future_planet_position(target, turn, ctx)
-        if target_pos and point_segment_distance(target_pos[0], target_pos[1], prev_x, prev_y, x, y) <= target.radius:
-            return True
+        first_hit = first_planet_collision(prev_x, prev_y, x, y, turn, ctx)
+        if first_hit is not None:
+            return first_hit.id == target.id
         prev_x, prev_y = x, y
     return False
+
+
+def first_planet_collision(ax, ay, bx, by, turn, ctx):
+    best_planet = None
+    best_t = None
+    for planet in ctx["planets"]:
+        pos = future_planet_position(planet, turn, ctx)
+        if pos is None:
+            continue
+        t = segment_circle_hit_fraction(pos[0], pos[1], planet.radius, ax, ay, bx, by)
+        if t is None:
+            continue
+        if best_t is None or t < best_t:
+            best_t = t
+            best_planet = planet
+    return best_planet
+
+
+def segment_circle_hit_fraction(cx, cy, radius, ax, ay, bx, by):
+    dx = bx - ax
+    dy = by - ay
+    fx = ax - cx
+    fy = ay - cy
+    a = dx * dx + dy * dy
+    if a <= 1e-12:
+        return 0.0 if math.hypot(ax - cx, ay - cy) <= radius else None
+    b = 2.0 * (fx * dx + fy * dy)
+    c = fx * fx + fy * fy - radius * radius
+    disc = b * b - 4.0 * a * c
+    if disc < 0:
+        return None
+    root = math.sqrt(disc)
+    t1 = (-b - root) / (2.0 * a)
+    t2 = (-b + root) / (2.0 * a)
+    hits = [t for t in (t1, t2) if 0.0 <= t <= 1.0]
+    if not hits:
+        return None
+    return min(hits)
 
 
 def source_safety_penalty(source, ships, ctx):
@@ -437,11 +512,6 @@ def comet_remaining_life(planet_id, ctx):
         path = group.get("paths", [])[planet_ids.index(planet_id)]
         return max(0, len(path) - int(group.get("path_index", 0) or 0))
     return 0
-
-
-def estimate_fleet_eta_to_planet(fleet, planet):
-    travel = max(0.0, math.hypot(planet.x - fleet.x, planet.y - fleet.y) - planet.radius)
-    return max(1, int(math.ceil(travel / fleet_speed(fleet.ships))))
 
 
 def fleet_speed(ships):
