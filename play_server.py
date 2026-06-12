@@ -49,7 +49,7 @@ TWO_PLAYER_LINEUP = [
 ]
 
 DEV_TWO_PLAYER_LINEUP = [
-    ("main.py", "My Bot"),
+    ("producer_flow_bot.py", "ProducerFlowBot"),
     ("public-marco-1060", "Public 1060"),
 ]
 
@@ -88,6 +88,8 @@ def load_named_agent(name):
         return load_public_agent(name)
     if name == "main.py":
         return load_local_agent(reload=True)
+    if name == "producer_flow_bot.py":
+        return load_python_file_agent("producer_flow_bot.py", reload=True)
     return orbit_wars.agents["starter"]
 
 
@@ -157,6 +159,20 @@ def load_local_agent(reload=False):
     spec.loader.exec_module(module)
     bot_agent = getattr(module, "agent")
     return bot_agent
+
+
+def load_python_file_agent(filename, reload=False):
+    module_path = ROOT / filename
+    module_name = (
+        f"orbit_wars_{module_path.stem}_{random.randrange(2**31)}"
+        if reload
+        else f"orbit_wars_{module_path.stem}"
+    )
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return getattr(module, "agent")
 
 
 def load_local_module_for_analysis():

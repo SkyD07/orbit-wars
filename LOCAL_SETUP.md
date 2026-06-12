@@ -65,5 +65,6 @@ http://127.0.0.1:5000
 Spectator controls:
 
 - The 4-player lineup is `Public 1224`, `Public 1000`, `Public 1060`, and local `Medium`.
-- Click `Step` to advance exactly one turn.
-- The bots only act when you click `Step`; there is no automatic progression.
+- `Dev 2P` is `ProducerFlowBot` from `producer_flow_bot.py` vs `Public 1060`.
+- Click `Step` to advance exactly one turn, or use `Auto` to toggle automatic stepping.
+- `producer_flow_bot.py` is the current fast flow-difference development bot. It generates many cheap candidates, tests ship-size buckets, validates only top candidates geometrically, then greedily selects moves. `main.py` remains the larger analysis/scaffold bot.
