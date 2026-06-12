@@ -1,0 +1,242 @@
+version: 1
+purpose: compact reference for Orbit Wars derived bot values and cache strategy
+
+raw_inputs:
+  player: current player id
+  step: current game step
+  angular_velocity: orbit speed for rotating planets
+  planets: "[id, owner, x, y, radius, ships, production][]"
+  fleets: "[id, owner, x, y, angle, from_planet_id, ships][]"
+  comets: active comet path groups
+  comet_planet_ids: ids of comet planets
+  remainingOverageTime: Kaggle extra time budget
+  initial_planets: initial geometry; use current planets for live owner/ships
+
+debug_payload:
+  priorityGroups:
+    shape: "{rank, role, planet_ids}[]"
+    G1: bot initial region minus rotating planets
+    G2: neighbor region in previous rotating-direction priority minus rotating planets
+    G3: other neighbor region minus rotating planets
+    G4: opposite region minus rotating planets
+  rotatingGroups:
+    shape: "{rank, role, planet_ids}[]"
+    R1: rotating planets in bot initial region
+    R2: adjacent rotating group against rotation direction
+    R3: other adjacent rotating group
+    R4: opposite rotating group
+  temporary_opening_inputs:
+    use: first creation only
+    removed_after: [G1-G4, R1-R4]
+    values: [initial_planets, top_left, top_right, bottom_left, bottom_right, static_planet_ids, rotating_planet_ids]
+
+constants:
+  board_size: 100
+  center: [50, 50]
+  sun_radius: 10
+  max_steps: 500
+  max_ship_speed: 6
+  rotation_static_rule: orbit_radius + radius >= 50
+
+derived:
+  parsed:
+    planets:
+      from: planets
+      shape: Planet(id, owner, x, y, radius, ships, production)
+      cost: low
+      cache: per_step
+    fleets:
+      from: fleets
+      shape: Fleet(id, owner, x, y, angle, from_planet_id, ships)
+      cost: low
+      cache: per_step
+    planet_by_id:
+      from: parsed.planets
+      formula: "{p.id: p}"
+      cost: low
+      cache: per_step
+
+  groups:
+    my_planets:
+      formula: p.owner == player
+      use: launch sources, score
+      cost: low
+      cache: per_step
+    enemy_planets:
+      formula: p.owner not in [-1, player]
+      use: attacks, threats
+      cost: low
+      cache: per_step
+    neutral_planets:
+      formula: p.owner == -1
+      use: expansion
+      cost: low
+      cache: per_step
+    my_fleets:
+      formula: f.owner == player
+      use: score, reinforcement
+      cost: low
+      cache: per_step
+    enemy_fleets:
+      formula: f.owner != player
+      use: attack detection
+      cost: low
+      cache: per_step
+
+  score:
+    ship_score:
+      formula: sum(owned_planet_ships) + sum(owned_fleet_ships)
+      use: current standing
+      cost: low
+      cache: per_step
+    production_score:
+      formula: sum(p.production for owned planets)
+      use: economy
+      cost: low
+      cache: per_step
+    neutral_production:
+      formula: sum(p.production for neutral planets)
+      use: expansion potential
+      cost: low
+      cache: per_step
+
+  geometry:
+    distance:
+      formula: hypot(ax-bx, ay-by)
+      use: travel, nearest target
+      cost: low
+      cache: pair_matrix_or_window
+    orbit_radius:
+      formula: hypot(x-50, y-50)
+      use: static/rotating classification
+      cost: low
+      cache: per_game
+    is_static:
+      formula: orbit_radius + radius >= 50
+      use: aiming simplification
+      cost: low
+      cache: per_game
+    quadrant_assignment:
+      values: [top_left, top_right, bottom_left, bottom_right]
+      use: opening region strategy
+      cost: low_medium
+      cache: per_game
+      future: preserve 4-fold symmetry; assign boundary/sun-band planets consistently
+
+  movement:
+    fleet_speed:
+      formula: 1 + (6 - 1) * (log(ships) / log(1000)) ** 1.5
+      use: travel/intercept
+      cost: low
+      cache: by_ship_count
+    travel_estimate:
+      formula: ceil(max(0, distance - source.radius - target.radius) / fleet_speed)
+      use: cheap filter only
+      cost: low
+      cache: source_target_ship_bucket
+    future_planet_position:
+      static: [x, y]
+      rotating: [50 + r*cos(angle + angular_velocity*t), 50 + r*sin(angle + angular_velocity*t)]
+      comet: comet.path[path_index + t]
+      use: intercept, threat detection
+      cost: low_medium
+      cache: planet_id_by_turn_offset
+    exact_intercept:
+      valid_when: simulated_hit_step == planned_flight_steps
+      rejects: [early_hit, late_hit, no_hit, sun_hit, out_of_bounds]
+      returns: [angle, fleet_steps, safe, target_position]
+      cost: medium_high
+      cache_key_live: [step, source_id, target_id, ships]
+      cache_key_opening: [launch_step, source_id, target_id, ships]
+
+  safety:
+    sun_collision:
+      formula: distance(center, path_segment) <= sun_radius
+      use: reject destroyed fleets
+      cost: low
+      cache: candidate_path
+    out_of_bounds:
+      formula: x < 0 or x > 100 or y < 0 or y > 100
+      use: reject destroyed fleets
+      cost: low
+      cache: inside_intercept
+
+  economy:
+    capture_cost:
+      formula: target.ships + 1
+      use: minimum immediate capture
+      cost: low
+      cache: per_step
+      stronger: projected_target_garrison_at_eta + 1
+    waiting_steps_to_afford:
+      formula: ceil((target_cost - source_ships + 1) / source_production), floor 0
+      use: opening target rank
+      cost: low
+      cache: source_target_step
+    target_production:
+      formula: target.production
+      use: tie-break, long-term value
+      cost: low
+      cache: per_game_non_comet
+    priority_value:
+      formula: (20 - n_step - effectiveness) * target_production
+      use: first-10-step opening target priority
+      higher_is_better: true
+      cost: low
+      cache: opening
+
+  tactics:
+    incoming_fleet_target:
+      method: simulate fleet_pos_t and planet_pos_t; hit if distance <= radius
+      use: detect attacks
+      cost: medium
+      cache: per_step
+      optimize: test enemy fleets vs my planets first
+    threatened_planet:
+      formula: incoming_enemy_ships > current_ships + production * eta
+      use: defense trigger
+      cost: medium
+      cache: per_step
+      stronger: group arrivals; resolve multi-owner combat; include friendly reinforcements
+    reinforcement_need:
+      formula: incoming_enemy_power - projected_garrison + safety_margin
+      use: defense amount
+      cost: medium
+      cache: threatened_planet
+
+  regions:
+    region_capture_cost:
+      formula: sum(capture_cost(p) for p in region if p.owner != player)
+      cost: low
+      cache: opening_or_per_step
+    region_revenue:
+      formula: sum(p.production for p in region)
+      cost: low
+      cache: opening
+    top_targets_by_player_step:
+      steps: 10
+      choose_by: [lowest_effectiveness, highest_target_production]
+      priority_formula: (20 - n_step - effectiveness) * target_production
+      cost: medium
+      cache: opening
+
+future_engine:
+  position_state: [planet_owner, planet_ships, fleets, step, comet_state]
+  static_map: [initial_geometry, static_flags, symmetry_groups, quadrant_assignment, production, radius]
+  movegen_cache: [sources, target_candidates, capture_costs, exact_intercepts, safe_angles, reachable_targets]
+  eval_cache: [ship_score, production_score, threats, region_control, incoming_ledger, projected_captures]
+  opening_cache: [first_10_rankings, quadrant_priority, intercept_timing, safe_expansion_sequence]
+
+performance_priority:
+  cache_first:
+    - fleet_speed_by_ship_count
+    - future_position_by_planet_turn
+    - exact_intercept
+    - incoming_fleet_eta
+    - region_opening_reports
+  staged_filter:
+    - ownership_production
+    - capture_cost
+    - distance_estimate
+    - sun_safety
+    - exact_intercept

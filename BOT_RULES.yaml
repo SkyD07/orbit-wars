@@ -1,0 +1,67 @@
+version: 1
+status: draft
+purpose: compact rules/config reference for Orbit Wars bot development
+
+map:
+  board_size: 100
+  center: [50, 50]
+  sun_radius: 10
+  max_steps: 500
+
+region_rules:
+  active_quarter_method: compact_seeded_quadrants
+  compact_seeded_quadrants:
+    inputs: [planet.x, planet.y]
+    center: [50, 50]
+    anchor: bot_start_planet
+    clusters: 4
+    steps:
+      - choose bot start planet as anchor seed
+      - choose opposite and perpendicular seeds by angle around sun
+      - assign remaining planets by compact distance score while preserving equal cluster size
+      - penalize isolated planets from being pulled into bot cluster
+      - run cheap anchor-cluster refinement by replacing far anchor-cluster planets with closer adjacent outsiders
+      - label the anchor group by the bot start planet quadrant
+    complexity: O(n log n)
+    cache: opening_or_per_step
+    ui_debug: color planets by assigned angular quadrant
+    compact_assignment:
+      centroid_weight: 1.0
+      seed_weight: 0.35
+      adjacency_bonus: 1.5
+      bot_anchor_distance_weight: 0.45
+      isolated_bot_cluster_penalty: 18.0
+    anchor_refinement:
+      preserve_group_sizes: true
+      preserve_bot_anchor: true
+      objective: reduce anchor cluster compactness
+
+opening:
+  active_region_source: quadrants
+  cache:
+    build_once: [G1-G4, R1-R4]
+    temporary_inputs: [initial_planets, top_left, top_right, bottom_left, bottom_right, static_planet_ids, rotating_planet_ids]
+    reuse_when_groups_exist: true
+  planet_type_groups:
+    scope: global_map
+    static: orbit_radius + planet_radius >= 50
+    rotating: not static
+    static_use: main_base_defense
+    rotating_use: transit_transport_attack_path
+  quadrant_priority_groups:
+    scope: initial_quadrant_regions
+    membership: region_planets_minus_rotating_planets
+    rotating_planets: excluded_from_group_membership_used_only_as_transit_direction_reference
+    rank_1: bot_initial_region
+    rank_2: adjacent_region_in_selected_rotating_planet_direction
+    rank_3: remaining_adjacent_region
+    rank_4: opposite_region
+  rotating_priority_groups:
+    membership: rotating_planets_only
+    rank_1: bot_initial_region
+    rank_2: adjacent_region_against_rotation_direction
+    rank_3: remaining_adjacent_region
+    rank_4: opposite_region
+  target_lists: first_10_player_steps
+  effectiveness: waiting_steps
+  priority_formula: (20 - n_step - effectiveness) * target_production

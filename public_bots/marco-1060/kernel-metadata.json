@@ -1,0 +1,21 @@
+{
+  "id": "marcodg/marco-dg-v3-3-top-score-1060-5",
+  "id_no": 118173109,
+  "title": "Marco DG v3.3 (top score: 1060.5)",
+  "code_file": "marco-dg-v3-3-top-score-1060-5.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [],
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "competition_sources": [
+    "orbit-wars"
+  ],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-images/python@sha256:c370a5ff133d162d17c2dca332b50f3e85c0b0ed1471ee18e98e3009eee80b08",
+  "machine_shape": "None"
+}

@@ -1,0 +1,23 @@
+{
+  "id": "aidensong123/lb-highest-1000-search-learned-value-function",
+  "id_no": 118931300,
+  "title": "LB Highest 1000+ : Search + Learned Value Function",
+  "code_file": "lb-highest-1000-search-learned-value-function.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "aidensong123/orbit-wars-value"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [
+    "orbit-wars"
+  ],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-images/python@sha256:c370a5ff133d162d17c2dca332b50f3e85c0b0ed1471ee18e98e3009eee80b08",
+  "machine_shape": "None"
+}

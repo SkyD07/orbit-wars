@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Orbit Wars Local Play</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main class="app">
+      <section class="boardPane">
+        <canvas id="board" width="1200" height="1200"></canvas>
+      </section>
+      <aside class="side">
+        <div class="titleRow">
+          <h1>Orbit Wars</h1>
+          <button id="newGame">New</button>
+        </div>
+        <div class="toolbar">
+          <label>
+            Match
+            <select id="matchMode">
+              <option value="4p">4P</option>
+              <option value="2p">2P</option>
+              <option value="dev2p" selected>Dev 2P</option>
+            </select>
+          </label>
+          <label>
+            Seed
+            <input id="seed" inputmode="numeric" placeholder="random">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="step">Step</button>
+          <button id="auto">Auto</button>
+        </div>
+        <div id="status" class="status">
+          <div id="stepStatus"></div>
+          <div id="playerStatus"></div>
+        </div>
+        <div class="panel">
+          <h2>Lineup</h2>
+          <ol id="lineup"></ol>
+        </div>
+        <div class="panel">
+          <h2>Bot Log</h2>
+          <select id="logBot"></select>
+          <div id="botLog"></div>
+        </div>
+        <div class="panel">
+          <h2>Planets</h2>
+          <div id="details"></div>
+        </div>
+      </aside>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

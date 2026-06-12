@@ -1,0 +1,9 @@
+name: orbit-wars
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - kaggle==2.1.2
+      - kaggle-environments==1.29.1
