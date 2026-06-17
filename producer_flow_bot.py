@@ -31,7 +31,7 @@ def agent(obs, config=None):
     candidates.extend(gen_attack_candidates(ctx))
     candidates.extend(gen_endgame_candidates(ctx))
 
-    candidates = [cand for cand in candidates if cand.score > -20]
+    candidates = [cand for cand in candidates if cand.score > ctx["policy"]["min_score"] - 25]
     candidates.sort(key=lambda cand: cand.score, reverse=True)
     candidates = validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350)
     return select_moves_greedy(candidates, ctx)
@@ -61,7 +61,24 @@ def build_context(obs):
     ctx["neutral_planets"] = [p for p in planets if p.owner == -1]
     ctx["enemy_fleets"] = [f for f in fleets if f.owner != player]
     ctx["incoming"] = rough_incoming_by_target(ctx)
+    ctx["policy"] = build_strategy_policy(ctx)
     return ctx
+
+
+def build_strategy_policy(ctx):
+    my_planet_ships = sum(int(p.ships) for p in ctx["my_planets"])
+    my_fleet_ships = sum(int(f.ships) for f in ctx["fleets"] if f.owner == ctx["player"])
+    owned_stock = my_planet_ships + my_fleet_ships
+    return {
+        "owned_stock": owned_stock,
+        "max_new_fleets": 6,
+        "min_score": 8.0,
+        "action_tax": 7.0,
+        "commitment_cost_rate": 0.18,
+        "max_source_commit_fraction": 0.55,
+        "max_total_commit_fraction": 0.35,
+        "max_total_commit": max(12, int(owned_stock * 0.35)),
+    }
 
 
 def gen_capture_candidates(ctx):
@@ -129,13 +146,24 @@ def gen_defense_candidates(ctx):
         for source in usable_sources(ctx):
             if source.id == target.id:
                 continue
-            buckets = unique_clamped([need, need + target.production * 2, int(source.ships * 0.35)], 1, int(source.ships) - reserve(source, ctx))
+            buckets = unique_clamped(
+                [need, need + target.production * 2, int(source.ships * 0.35)],
+                1,
+                source_available_ships(source, ctx),
+            )
             for ships in buckets:
                 arrival = estimate_arrival(source, target, ships, ctx)
                 if arrival > eta + 3:
                     continue
                 angle = aim_angle(source, target, arrival, ctx)
-                score = 60 + need * 0.8 + target.production * max(0, ctx["remaining_steps"] - arrival) * 0.25 - ships * 0.35
+                policy = ctx["policy"]
+                score = (
+                    60
+                    + need * 0.8
+                    + target.production * max(0, ctx["remaining_steps"] - arrival) * 0.25
+                    - ships * policy["commitment_cost_rate"]
+                    - policy["action_tax"] * 0.5
+                )
                 candidates.append(Candidate(source.id, target.id, ships, angle, arrival, score, "REINFORCE_THREATENED"))
     return candidates
 
@@ -196,7 +224,7 @@ def ship_buckets(source, target, ctx):
     arrival0 = estimate_arrival(source, target, max(1, int(target.ships) + 1), ctx)
     predicted_owner, predicted_ships = cheap_forecast_target(target, arrival0, ctx)
     base = max(1, int(predicted_ships) + (1 if predicted_owner != ctx["player"] else 0))
-    available = int(source.ships) - reserve(source, ctx)
+    available = source_available_ships(source, ctx)
     return unique_clamped(
         [
             base,
@@ -213,7 +241,8 @@ def ship_buckets(source, target, ctx):
 
 
 def score_move(source, target, ships, ctx, mission):
-    if ships <= 0 or ships > int(source.ships) - reserve(source, ctx):
+    policy = ctx["policy"]
+    if ships <= 0 or ships > source_available_ships(source, ctx):
         return None
     eta = estimate_arrival(source, target, ships, ctx)
     if eta <= 0 or ctx["step"] + eta >= MAX_STEPS:
@@ -240,7 +269,9 @@ def score_move(source, target, ships, ctx, mission):
     late_penalty = max(0, ctx["step"] + eta - 430) * 0.5
     comet_penalty = 45 if target.id in ctx["comet_ids"] and comet_remaining_life(target.id, ctx) <= eta + 8 else 0
     enemy_bonus = 20 if mission == "ATTACK_ENEMY_PRODUCER" and target.owner not in (-1, ctx["player"]) else 0
-    score = gain + timing_bonus + enemy_bonus - ships - source_penalty - late_penalty - comet_penalty
+    action_tax = policy["action_tax"] * (0.65 if mission == "SNIPE_CONTESTED" else 1.0)
+    commitment_cost = ships * policy["commitment_cost_rate"]
+    score = gain + timing_bonus + enemy_bonus - commitment_cost - action_tax - source_penalty - late_penalty - comet_penalty
     return Candidate(source.id, target.id, int(ships), angle, eta, score, mission)
 
 
@@ -261,17 +292,21 @@ def validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350):
     return valid
 
 
-def select_moves_greedy(candidates, ctx, max_moves=12):
+def select_moves_greedy(candidates, ctx):
+    policy = ctx["policy"]
     moves = []
-    budget = {p.id: max(0, int(p.ships) - reserve(p, ctx)) for p in ctx["my_planets"]}
+    budget = {p.id: source_available_ships(p, ctx) for p in ctx["my_planets"]}
     target_pressure = defaultdict(int)
-    selected_keys = set()
-    for _ in range(max_moves):
+    selected_intents = set()
+    total_committed = 0
+    for _ in range(policy["max_new_fleets"]):
         best = None
-        best_score = 0
+        best_score = policy["min_score"]
         for cand in candidates:
-            key = (cand.source_id, cand.target_id, cand.ships)
-            if key in selected_keys or cand.ships > budget.get(cand.source_id, 0):
+            intent = (cand.source_id, cand.target_id, cand.mission)
+            if intent in selected_intents or cand.ships > budget.get(cand.source_id, 0):
+                continue
+            if total_committed + cand.ships > policy["max_total_commit"]:
                 continue
             target = ctx["planet_by_id"].get(cand.target_id)
             if target is None:
@@ -285,8 +320,9 @@ def select_moves_greedy(candidates, ctx, max_moves=12):
             break
         moves.append([best.source_id, best.angle, best.ships])
         budget[best.source_id] -= best.ships
+        total_committed += best.ships
         target_pressure[best.target_id] += best.ships
-        selected_keys.add((best.source_id, best.target_id, best.ships))
+        selected_intents.add((best.source_id, best.target_id, best.mission))
     return moves
 
 
@@ -452,6 +488,12 @@ def source_safety_penalty(source, ships, ctx):
     if remaining >= reserve_ships:
         return 0.0
     return (reserve_ships - remaining) * 2.2
+
+
+def source_available_ships(source, ctx):
+    reserve_available = max(0, int(source.ships) - reserve(source, ctx))
+    policy_cap = int(source.ships * ctx["policy"]["max_source_commit_fraction"])
+    return max(0, min(reserve_available, policy_cap))
 
 
 def reserve(source, ctx):
