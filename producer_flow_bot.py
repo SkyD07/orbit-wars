@@ -89,29 +89,26 @@ def build_context(obs):
     p_radius = [float(p[P_RADIUS]) for p in raw_planets]
     p_ships = [int(p[P_SHIPS]) for p in raw_planets]
     p_prod = [int(p[P_PROD]) for p in raw_planets]
-    id_to_i = {pid: i for i, pid in enumerate(p_id)}
+    f_id = [int(f[F_ID]) for f in raw_fleets]
     f_owner = [int(f[F_OWNER]) for f in raw_fleets]
     f_x = [float(f[F_X]) for f in raw_fleets]
     f_y = [float(f[F_Y]) for f in raw_fleets]
     f_angle = [float(f[F_ANGLE]) for f in raw_fleets]
+    f_from = [int(f[F_FROM]) for f in raw_fleets]
     f_ships = [int(f[F_SHIPS]) for f in raw_fleets]
-    initial_x_by_id = {}
-    initial_y_by_id = {}
+    initial_orbit_radius_by_id = {}
     initial_static_by_id = {}
     for p in raw_initial_planets:
         pid = int(p[P_ID])
         x = float(p[P_X])
         y = float(p[P_Y])
         radius = float(p[P_RADIUS])
-        initial_x_by_id[pid] = x
-        initial_y_by_id[pid] = y
+        initial_orbit_radius_by_id[pid] = math.hypot(x - CENTER, y - CENTER)
         initial_static_by_id[pid] = is_static_geometry(x, y, radius)
     ctx = {
         "player": player,
         "step": step,
         "remaining_steps": MAX_STEPS - step,
-        "raw_planets": raw_planets,
-        "raw_fleets": raw_fleets,
         "p_id": p_id,
         "p_owner": p_owner,
         "p_x": p_x,
@@ -119,14 +116,14 @@ def build_context(obs):
         "p_radius": p_radius,
         "p_ships": p_ships,
         "p_prod": p_prod,
-        "id_to_i": id_to_i,
+        "f_id": f_id,
         "f_owner": f_owner,
         "f_x": f_x,
         "f_y": f_y,
         "f_angle": f_angle,
+        "f_from": f_from,
         "f_ships": f_ships,
-        "initial_x_by_id": initial_x_by_id,
-        "initial_y_by_id": initial_y_by_id,
+        "initial_orbit_radius_by_id": initial_orbit_radius_by_id,
         "initial_static_by_id": initial_static_by_id,
         "comets": read(obs, "comets", []) or [],
         "comet_ids": comet_ids,
@@ -620,14 +617,12 @@ def future_planet_position_i(planet_i, turns, ctx):
     planet_id = ctx["p_id"][planet_i]
     if planet_id in ctx["comet_ids"]:
         return future_comet_position(planet_id, turns, ctx)
-    initial_x = ctx["initial_x_by_id"].get(planet_id)
-    if initial_x is None or ctx["initial_static_by_id"].get(planet_id, True):
+    orbit_radius = ctx["initial_orbit_radius_by_id"].get(planet_id)
+    if orbit_radius is None or ctx["initial_static_by_id"].get(planet_id, True):
         return ctx["p_x"][planet_i], ctx["p_y"][planet_i]
-    initial_y = ctx["initial_y_by_id"][planet_id]
-    radius = math.hypot(initial_x - CENTER, initial_y - CENTER)
     current_angle = math.atan2(ctx["p_y"][planet_i] - CENTER, ctx["p_x"][planet_i] - CENTER)
     future_angle = current_angle + ctx["angular_velocity"] * turns
-    return CENTER + radius * math.cos(future_angle), CENTER + radius * math.sin(future_angle)
+    return CENTER + orbit_radius * math.cos(future_angle), CENTER + orbit_radius * math.sin(future_angle)
 
 
 def future_comet_position(planet_id, turns, ctx):
