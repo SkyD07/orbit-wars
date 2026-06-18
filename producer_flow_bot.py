@@ -8,6 +8,25 @@ SUN_RADIUS = 10.0
 MAX_SPEED = 6.0
 MAX_STEPS = 500
 
+P_ID = 0
+P_OWNER = 1
+P_X = 2
+P_Y = 3
+P_RADIUS = 4
+P_SHIPS = 5
+P_PROD = 6
+
+F_ID = 0
+F_OWNER = 1
+F_X = 2
+F_Y = 3
+F_ANGLE = 4
+F_FROM = 5
+F_SHIPS = 6
+
+XY_X = 0
+XY_Y = 1
+
 Planet = namedtuple("Planet", "id owner x y radius ships production")
 Fleet = namedtuple("Fleet", "id owner x y angle from_planet_id ships")
 Candidate = namedtuple("Candidate", "source_id target_id ships angle eta score mission")
@@ -541,7 +560,7 @@ def future_comet_position(planet_id, turns, ctx):
         path = group.get("paths", [])[index]
         path_index = int(group.get("path_index", 0) or 0) + int(turns)
         if 0 <= path_index < len(path):
-            return path[path_index][0], path[path_index][1]
+            return path[path_index][XY_X], path[path_index][XY_Y]
         return None
     return None
 
