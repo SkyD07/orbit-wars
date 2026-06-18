@@ -63,7 +63,7 @@ def candidate_with_score(candidate, score):
 
 def agent(obs, config=None):
     ctx = build_context(obs)
-    if not ctx["my_planets"]:
+    if not ctx["my_idx"]:
         return []
 
     candidates = []
@@ -97,6 +97,11 @@ def build_context(obs):
     p_ships = [int(p[P_SHIPS]) for p in raw_planets]
     p_prod = [int(p[P_PROD]) for p in raw_planets]
     id_to_i = {pid: i for i, pid in enumerate(p_id)}
+    f_owner = [int(f[F_OWNER]) for f in raw_fleets]
+    f_x = [float(f[F_X]) for f in raw_fleets]
+    f_y = [float(f[F_Y]) for f in raw_fleets]
+    f_angle = [float(f[F_ANGLE]) for f in raw_fleets]
+    f_ships = [int(f[F_SHIPS]) for f in raw_fleets]
     ctx = {
         "player": player,
         "step": step,
@@ -114,6 +119,11 @@ def build_context(obs):
         "p_prod": p_prod,
         "id_to_i": id_to_i,
         "fleets": fleets,
+        "f_owner": f_owner,
+        "f_x": f_x,
+        "f_y": f_y,
+        "f_angle": f_angle,
+        "f_ships": f_ships,
         "initial_by_id": {p.id: p for p in initial_planets},
         "comets": read(obs, "comets", []) or [],
         "comet_ids": comet_ids,
@@ -122,10 +132,7 @@ def build_context(obs):
     ctx["my_idx"] = [i for i, owner in enumerate(p_owner) if owner == player]
     ctx["enemy_idx"] = [i for i, owner in enumerate(p_owner) if owner not in (-1, player)]
     ctx["neutral_idx"] = [i for i, owner in enumerate(p_owner) if owner == -1]
-    ctx["my_planets"] = [planets[i] for i in ctx["my_idx"]]
-    ctx["enemy_planets"] = [planets[i] for i in ctx["enemy_idx"]]
-    ctx["neutral_planets"] = [planets[i] for i in ctx["neutral_idx"]]
-    ctx["enemy_fleets"] = [f for f in fleets if f.owner != player]
+    ctx["enemy_fleet_idx"] = [i for i, owner in enumerate(f_owner) if owner != player]
     ctx["incoming"] = rough_incoming_by_target(ctx)
     ctx["policy"] = build_strategy_policy(ctx)
     return ctx
@@ -133,7 +140,7 @@ def build_context(obs):
 
 def build_strategy_policy(ctx):
     my_planet_ships = sum(ctx["p_ships"][i] for i in ctx["my_idx"])
-    my_fleet_ships = sum(int(f.ships) for f in ctx["fleets"] if f.owner == ctx["player"])
+    my_fleet_ships = sum(ctx["f_ships"][i] for i, owner in enumerate(ctx["f_owner"]) if owner == ctx["player"])
     owned_stock = my_planet_ships + my_fleet_ships
     return {
         "owned_stock": owned_stock,
@@ -174,8 +181,8 @@ def gen_attack_candidates(ctx):
 def gen_snipe_candidates(ctx):
     candidates = []
     opportunities = {}
-    for fleet in ctx["enemy_fleets"]:
-        hit = nearest_future_hit(fleet, ctx, max_turns=55)
+    for fleet_i in ctx["enemy_fleet_idx"]:
+        hit = nearest_future_hit(fleet_i, ctx, max_turns=55)
         if hit is None:
             continue
         target_i, enemy_eta = hit
@@ -419,24 +426,25 @@ def cheap_forecast_target(target_i, turns, ctx):
 
 def rough_incoming_by_target(ctx):
     incoming = defaultdict(list)
-    for fleet in ctx["fleets"]:
-        hit = nearest_future_hit(fleet, ctx, max_turns=70)
+    for fleet_i in range(len(ctx["f_owner"])):
+        hit = nearest_future_hit(fleet_i, ctx, max_turns=70)
         if hit is not None:
             target_i, eta = hit
-            incoming[target_i].append({"eta": eta, "owner": fleet.owner, "ships": int(fleet.ships)})
+            incoming[target_i].append({"eta": eta, "owner": ctx["f_owner"][fleet_i], "ships": ctx["f_ships"][fleet_i]})
     for items in incoming.values():
         items.sort(key=lambda item: item["eta"])
     return incoming
 
 
-def nearest_future_hit(fleet, ctx, max_turns=70):
-    speed = fleet_speed(fleet.ships)
-    x = fleet.x
-    y = fleet.y
+def nearest_future_hit(fleet_i, ctx, max_turns=70):
+    speed = fleet_speed(ctx["f_ships"][fleet_i])
+    x = ctx["f_x"][fleet_i]
+    y = ctx["f_y"][fleet_i]
+    angle = ctx["f_angle"][fleet_i]
     for turn in range(1, max_turns + 1):
         prev_x, prev_y = x, y
-        x += math.cos(fleet.angle) * speed
-        y += math.sin(fleet.angle) * speed
+        x += math.cos(angle) * speed
+        y += math.sin(angle) * speed
         if x < 0 or x > BOARD_SIZE or y < 0 or y > BOARD_SIZE:
             return None
         if point_segment_distance(CENTER, CENTER, prev_x, prev_y, x, y) <= SUN_RADIUS:
