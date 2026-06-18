@@ -36,7 +36,6 @@ C_SCORE = 5
 C_MISSION = 6
 
 Planet = namedtuple("Planet", "id owner x y radius ships production")
-Fleet = namedtuple("Fleet", "id owner x y angle from_planet_id ships")
 
 
 def read(obs, key, default=None):
@@ -86,7 +85,6 @@ def build_context(obs):
     raw_fleets = read(obs, "fleets", []) or []
     raw_initial_planets = read(obs, "initial_planets", []) or []
     planets = [Planet(*p) for p in raw_planets]
-    fleets = [Fleet(*f) for f in raw_fleets]
     initial_planets = [Planet(*p) for p in raw_initial_planets]
     comet_ids = set(read(obs, "comet_planet_ids", []) or [])
     p_id = [int(p[P_ID]) for p in raw_planets]
@@ -118,7 +116,6 @@ def build_context(obs):
         "p_ships": p_ships,
         "p_prod": p_prod,
         "id_to_i": id_to_i,
-        "fleets": fleets,
         "f_owner": f_owner,
         "f_x": f_x,
         "f_y": f_y,
