@@ -351,13 +351,11 @@ def score_move(source_i, target_i, ships, ctx, mission):
 def validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350):
     valid = []
     for cand in candidates[:scan_limit]:
-        if cand[C_SOURCE_I] >= len(ctx["planets"]) or cand[C_TARGET_I] >= len(ctx["planets"]):
+        if cand[C_SOURCE_I] >= len(ctx["p_id"]) or cand[C_TARGET_I] >= len(ctx["p_id"]):
             continue
-        source = ctx["planets"][cand[C_SOURCE_I]]
-        target = ctx["planets"][cand[C_TARGET_I]]
         if ctx["p_owner"][cand[C_SOURCE_I]] != ctx["player"]:
             continue
-        if not path_is_reasonably_safe(source, target, cand[C_ANGLE], cand[C_SHIPS], cand[C_ETA], ctx):
+        if not path_is_reasonably_safe(cand[C_SOURCE_I], cand[C_TARGET_I], cand[C_ANGLE], cand[C_SHIPS], cand[C_ETA], ctx):
             continue
         valid.append(cand)
         if len(valid) >= valid_limit:
@@ -517,10 +515,10 @@ def aim_angle(source_i, target_i, eta, ctx):
     return math.atan2(pos[XY_Y] - ctx["p_y"][source_i], pos[XY_X] - ctx["p_x"][source_i])
 
 
-def path_is_reasonably_safe(source, target, angle, ships, eta, ctx):
+def path_is_reasonably_safe(source_i, target_i, angle, ships, eta, ctx):
     speed = fleet_speed(ships)
-    x = source.x + math.cos(angle) * (source.radius + 0.1)
-    y = source.y + math.sin(angle) * (source.radius + 0.1)
+    x = ctx["p_x"][source_i] + math.cos(angle) * (ctx["p_radius"][source_i] + 0.1)
+    y = ctx["p_y"][source_i] + math.sin(angle) * (ctx["p_radius"][source_i] + 0.1)
     prev_x, prev_y = x, y
     for turn in range(1, min(eta + 2, 90) + 1):
         x += math.cos(angle) * speed
@@ -531,7 +529,7 @@ def path_is_reasonably_safe(source, target, angle, ships, eta, ctx):
             return False
         first_hit = first_planet_collision(prev_x, prev_y, x, y, turn, ctx)
         if first_hit is not None:
-            return ctx["p_id"][first_hit] == target.id
+            return first_hit == target_i
         prev_x, prev_y = x, y
     return False
 
