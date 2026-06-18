@@ -29,7 +29,7 @@ XY_Y = 1
 
 Planet = namedtuple("Planet", "id owner x y radius ships production")
 Fleet = namedtuple("Fleet", "id owner x y angle from_planet_id ships")
-Candidate = namedtuple("Candidate", "source_id target_id ships angle eta score mission")
+Candidate = namedtuple("Candidate", "source_i target_i ships angle eta score mission")
 
 
 def read(obs, key, default=None):
@@ -59,25 +59,49 @@ def agent(obs, config=None):
 def build_context(obs):
     player = int(read(obs, "player", 0) or 0)
     step = int(read(obs, "step", 0) or 0)
-    planets = [Planet(*p) for p in (read(obs, "planets", []) or [])]
-    fleets = [Fleet(*f) for f in (read(obs, "fleets", []) or [])]
-    initial_planets = [Planet(*p) for p in (read(obs, "initial_planets", []) or [])]
+    raw_planets = read(obs, "planets", []) or []
+    raw_fleets = read(obs, "fleets", []) or []
+    raw_initial_planets = read(obs, "initial_planets", []) or []
+    planets = [Planet(*p) for p in raw_planets]
+    fleets = [Fleet(*f) for f in raw_fleets]
+    initial_planets = [Planet(*p) for p in raw_initial_planets]
     comet_ids = set(read(obs, "comet_planet_ids", []) or [])
+    p_id = [int(p[P_ID]) for p in raw_planets]
+    p_owner = [int(p[P_OWNER]) for p in raw_planets]
+    p_x = [float(p[P_X]) for p in raw_planets]
+    p_y = [float(p[P_Y]) for p in raw_planets]
+    p_radius = [float(p[P_RADIUS]) for p in raw_planets]
+    p_ships = [int(p[P_SHIPS]) for p in raw_planets]
+    p_prod = [int(p[P_PROD]) for p in raw_planets]
+    id_to_i = {pid: i for i, pid in enumerate(p_id)}
     ctx = {
         "player": player,
         "step": step,
         "remaining_steps": MAX_STEPS - step,
+        "raw_planets": raw_planets,
+        "raw_fleets": raw_fleets,
         "planets": planets,
         "planet_by_id": {p.id: p for p in planets},
+        "p_id": p_id,
+        "p_owner": p_owner,
+        "p_x": p_x,
+        "p_y": p_y,
+        "p_radius": p_radius,
+        "p_ships": p_ships,
+        "p_prod": p_prod,
+        "id_to_i": id_to_i,
         "fleets": fleets,
         "initial_by_id": {p.id: p for p in initial_planets},
         "comets": read(obs, "comets", []) or [],
         "comet_ids": comet_ids,
         "angular_velocity": float(read(obs, "angular_velocity", 0.0) or 0.0),
     }
-    ctx["my_planets"] = [p for p in planets if p.owner == player]
-    ctx["enemy_planets"] = [p for p in planets if p.owner not in (-1, player)]
-    ctx["neutral_planets"] = [p for p in planets if p.owner == -1]
+    ctx["my_idx"] = [i for i, owner in enumerate(p_owner) if owner == player]
+    ctx["enemy_idx"] = [i for i, owner in enumerate(p_owner) if owner not in (-1, player)]
+    ctx["neutral_idx"] = [i for i, owner in enumerate(p_owner) if owner == -1]
+    ctx["my_planets"] = [planets[i] for i in ctx["my_idx"]]
+    ctx["enemy_planets"] = [planets[i] for i in ctx["enemy_idx"]]
+    ctx["neutral_planets"] = [planets[i] for i in ctx["neutral_idx"]]
     ctx["enemy_fleets"] = [f for f in fleets if f.owner != player]
     ctx["incoming"] = rough_incoming_by_target(ctx)
     ctx["policy"] = build_strategy_policy(ctx)
@@ -85,7 +109,7 @@ def build_context(obs):
 
 
 def build_strategy_policy(ctx):
-    my_planet_ships = sum(int(p.ships) for p in ctx["my_planets"])
+    my_planet_ships = sum(ctx["p_ships"][i] for i in ctx["my_idx"])
     my_fleet_ships = sum(int(f.ships) for f in ctx["fleets"] if f.owner == ctx["player"])
     owned_stock = my_planet_ships + my_fleet_ships
     return {
@@ -102,11 +126,11 @@ def build_strategy_policy(ctx):
 
 def gen_capture_candidates(ctx):
     candidates = []
-    for source in usable_sources(ctx):
-        targets = candidate_targets_for_source(source, ctx["neutral_planets"], global_limit=14)
-        for target in targets:
-            for ships in ship_buckets(source, target, ctx):
-                cand = score_move(source, target, ships, ctx, "CAPTURE_NEUTRAL")
+    for source_i in usable_sources(ctx):
+        targets = candidate_targets_for_source(source_i, ctx["neutral_idx"], global_limit=14, ctx=ctx)
+        for target_i in targets:
+            for ships in ship_buckets(source_i, target_i, ctx):
+                cand = score_move(source_i, target_i, ships, ctx, "CAPTURE_NEUTRAL")
                 if cand:
                     candidates.append(cand)
     return candidates
@@ -114,11 +138,11 @@ def gen_capture_candidates(ctx):
 
 def gen_attack_candidates(ctx):
     candidates = []
-    for source in usable_sources(ctx):
-        targets = candidate_targets_for_source(source, ctx["enemy_planets"], global_limit=12)
-        for target in targets:
-            for ships in ship_buckets(source, target, ctx):
-                cand = score_move(source, target, ships, ctx, "ATTACK_ENEMY_PRODUCER")
+    for source_i in usable_sources(ctx):
+        targets = candidate_targets_for_source(source_i, ctx["enemy_idx"], global_limit=12, ctx=ctx)
+        for target_i in targets:
+            for ships in ship_buckets(source_i, target_i, ctx):
+                cand = score_move(source_i, target_i, ships, ctx, "ATTACK_ENEMY_PRODUCER")
                 if cand:
                     candidates.append(cand)
     return candidates
@@ -131,23 +155,20 @@ def gen_snipe_candidates(ctx):
         hit = nearest_future_hit(fleet, ctx, max_turns=55)
         if hit is None:
             continue
-        target, enemy_eta = hit
-        if target.owner == ctx["player"]:
+        target_i, enemy_eta = hit
+        if ctx["p_owner"][target_i] == ctx["player"]:
             continue
-        before_owner, before_ships = cheap_forecast_target(target, max(0, enemy_eta - 1), ctx)
-        after_owner, after_ships = cheap_forecast_target(target, enemy_eta, ctx)
-        if after_owner == before_owner and after_ships > max(3, target.production * 2):
+        before_owner, before_ships = cheap_forecast_target(target_i, max(0, enemy_eta - 1), ctx)
+        after_owner, after_ships = cheap_forecast_target(target_i, enemy_eta, ctx)
+        if after_owner == before_owner and after_ships > max(3, ctx["p_prod"][target_i] * 2):
             continue
-        current = opportunities.get(target.id)
+        current = opportunities.get(target_i)
         if current is None or enemy_eta < current:
-            opportunities[target.id] = enemy_eta
-    for target_id, enemy_eta in opportunities.items():
-        target = ctx["planet_by_id"].get(target_id)
-        if target is None:
-            continue
+            opportunities[target_i] = enemy_eta
+    for target_i, enemy_eta in opportunities.items():
         for source in usable_sources(ctx):
-            for ships in ship_buckets(source, target, ctx):
-                cand = score_move(source, target, ships, ctx, "SNIPE_CONTESTED")
+            for ships in ship_buckets(source, target_i, ctx):
+                cand = score_move(source, target_i, ships, ctx, "SNIPE_CONTESTED")
                 if not cand:
                     continue
                 if cand.eta < enemy_eta + 1 or cand.eta > enemy_eta + 4:
@@ -161,29 +182,29 @@ def gen_defense_candidates(ctx):
     threats = threatened_planets(ctx)
     if not threats:
         return candidates
-    for target, need, eta in threats[:8]:
-        for source in usable_sources(ctx):
-            if source.id == target.id:
+    for target_i, need, eta in threats[:8]:
+        for source_i in usable_sources(ctx):
+            if source_i == target_i:
                 continue
             buckets = unique_clamped(
-                [need, need + target.production * 2, int(source.ships * 0.35)],
+                [need, need + ctx["p_prod"][target_i] * 2, int(ctx["p_ships"][source_i] * 0.35)],
                 1,
-                source_available_ships(source, ctx),
+                source_available_ships(source_i, ctx),
             )
             for ships in buckets:
-                arrival = estimate_arrival(source, target, ships, ctx)
+                arrival = estimate_arrival(source_i, target_i, ships, ctx)
                 if arrival > eta + 3:
                     continue
-                angle = aim_angle(source, target, arrival, ctx)
+                angle = aim_angle(source_i, target_i, arrival, ctx)
                 policy = ctx["policy"]
                 score = (
                     60
                     + need * 0.8
-                    + target.production * max(0, ctx["remaining_steps"] - arrival) * 0.25
+                    + ctx["p_prod"][target_i] * max(0, ctx["remaining_steps"] - arrival) * 0.25
                     - ships * policy["commitment_cost_rate"]
                     - policy["action_tax"] * 0.5
                 )
-                candidates.append(Candidate(source.id, target.id, ships, angle, arrival, score, "REINFORCE_THREATENED"))
+                candidates.append(Candidate(source_i, target_i, ships, angle, arrival, score, "REINFORCE_THREATENED"))
     return candidates
 
 
@@ -191,14 +212,14 @@ def gen_endgame_candidates(ctx):
     if ctx["remaining_steps"] > 45:
         return []
     candidates = []
-    for source in usable_sources(ctx):
-        available = int(source.ships) - reserve(source, ctx)
+    for source_i in usable_sources(ctx):
+        available = source_available_ships(source_i, ctx)
         if available < 3:
             continue
-        targets = sorted(ctx["enemy_planets"] + ctx["neutral_planets"], key=lambda p: (distance(source, p), p.ships))[:6]
-        for target in targets:
-            ships = min(available, max(1, int(target.ships) + 1))
-            cand = score_move(source, target, ships, ctx, "ENDGAME_SCORE_DUMP")
+        targets = sorted(ctx["enemy_idx"] + ctx["neutral_idx"], key=lambda i: (distance_i(source_i, i, ctx), ctx["p_ships"][i]))[:6]
+        for target_i in targets:
+            ships = min(available, max(1, ctx["p_ships"][target_i] + 1))
+            cand = score_move(source_i, target_i, ships, ctx, "ENDGAME_SCORE_DUMP")
             if cand:
                 candidates.append(cand._replace(score=cand.score + ships * 0.25))
     return candidates
@@ -206,68 +227,68 @@ def gen_endgame_candidates(ctx):
 
 def usable_sources(ctx):
     return sorted(
-        (p for p in ctx["my_planets"] if int(p.ships) > reserve(p, ctx) + 1),
-        key=lambda p: (-p.ships, -p.production, p.id),
+        (i for i in ctx["my_idx"] if ctx["p_ships"][i] > reserve(i, ctx) + 1),
+        key=lambda i: (-ctx["p_ships"][i], -ctx["p_prod"][i], ctx["p_id"][i]),
     )
 
 
-def candidate_targets_for_source(source, targets, global_limit):
+def candidate_targets_for_source(source_i, targets, global_limit, ctx):
     if not targets:
         return []
     selected = []
     seen = set()
 
     def add(items):
-        for target in items:
-            if target.id in seen:
+        for target_i in items:
+            if target_i in seen:
                 continue
-            seen.add(target.id)
-            selected.append(target)
+            seen.add(target_i)
+            selected.append(target_i)
 
-    add(sorted(targets, key=lambda p: (-p.production, p.ships, distance_to_center(p), p.id))[:global_limit])
-    add(sorted(targets, key=lambda p: (distance(source, p), p.ships, -p.production, p.id))[:5])
+    add(sorted(targets, key=lambda i: (-ctx["p_prod"][i], ctx["p_ships"][i], distance_to_center_i(i, ctx), ctx["p_id"][i]))[:global_limit])
+    add(sorted(targets, key=lambda i: (distance_i(source_i, i, ctx), ctx["p_ships"][i], -ctx["p_prod"][i], ctx["p_id"][i]))[:5])
     add(
         sorted(
             targets,
-            key=lambda p: (
-                (int(p.ships) + 1) / max(1, p.production),
-                distance(source, p),
-                p.id,
+            key=lambda i: (
+                (ctx["p_ships"][i] + 1) / max(1, ctx["p_prod"][i]),
+                distance_i(source_i, i, ctx),
+                ctx["p_id"][i],
             ),
         )[:5]
     )
     return selected
 
 
-def ship_buckets(source, target, ctx):
-    arrival0 = estimate_arrival(source, target, max(1, int(target.ships) + 1), ctx)
-    predicted_owner, predicted_ships = cheap_forecast_target(target, arrival0, ctx)
+def ship_buckets(source_i, target_i, ctx):
+    arrival0 = estimate_arrival(source_i, target_i, max(1, ctx["p_ships"][target_i] + 1), ctx)
+    predicted_owner, predicted_ships = cheap_forecast_target(target_i, arrival0, ctx)
     base = max(1, int(predicted_ships) + (1 if predicted_owner != ctx["player"] else 0))
-    available = source_available_ships(source, ctx)
+    available = source_available_ships(source_i, ctx)
     return unique_clamped(
         [
             base,
-            base + int(target.production) * 2,
+            base + ctx["p_prod"][target_i] * 2,
             int(base * 1.15) + 1,
             int(base * 1.35) + 1,
-            int(source.ships * 0.25),
-            int(source.ships * 0.50),
-            int(source.ships * 0.75),
+            int(ctx["p_ships"][source_i] * 0.25),
+            int(ctx["p_ships"][source_i] * 0.50),
+            int(ctx["p_ships"][source_i] * 0.75),
         ],
         1,
         available,
     )
 
 
-def score_move(source, target, ships, ctx, mission):
+def score_move(source_i, target_i, ships, ctx, mission):
     policy = ctx["policy"]
-    if ships <= 0 or ships > source_available_ships(source, ctx):
+    if ships <= 0 or ships > source_available_ships(source_i, ctx):
         return None
-    eta = estimate_arrival(source, target, ships, ctx)
+    eta = estimate_arrival(source_i, target_i, ships, ctx)
     if eta <= 0 or ctx["step"] + eta >= MAX_STEPS:
         return None
-    angle = aim_angle(source, target, eta, ctx)
-    target_owner, target_ships = cheap_forecast_target(target, eta, ctx)
+    angle = aim_angle(source_i, target_i, eta, ctx)
+    target_owner, target_ships = cheap_forecast_target(target_i, eta, ctx)
     margin = ships - target_ships
     remaining = max(0, ctx["remaining_steps"] - eta)
 
@@ -275,33 +296,34 @@ def score_move(source, target, ships, ctx, mission):
         return None
 
     if target_owner == ctx["player"]:
-        gain = ships * 0.15 + target.production * min(eta, 8)
+        gain = ships * 0.15 + ctx["p_prod"][target_i] * min(eta, 8)
     elif margin > 0:
-        production_gain = target.production * remaining
-        denial = target.production * remaining * 0.8 if target_owner != -1 else 0.0
+        production_gain = ctx["p_prod"][target_i] * remaining
+        denial = ctx["p_prod"][target_i] * remaining * 0.8 if target_owner != -1 else 0.0
         gain = production_gain + denial + margin * 0.2
     else:
         gain = -ships * 0.8
 
     timing_bonus = max(0, 25 - eta) * 0.45
-    source_penalty = source_safety_penalty(source, ships, ctx)
+    source_penalty = source_safety_penalty(source_i, ships, ctx)
     late_penalty = max(0, ctx["step"] + eta - 430) * 0.5
-    comet_penalty = 45 if target.id in ctx["comet_ids"] and comet_remaining_life(target.id, ctx) <= eta + 8 else 0
-    enemy_bonus = 20 if mission == "ATTACK_ENEMY_PRODUCER" and target.owner not in (-1, ctx["player"]) else 0
+    target_id = ctx["p_id"][target_i]
+    comet_penalty = 45 if target_id in ctx["comet_ids"] and comet_remaining_life(target_id, ctx) <= eta + 8 else 0
+    enemy_bonus = 20 if mission == "ATTACK_ENEMY_PRODUCER" and ctx["p_owner"][target_i] not in (-1, ctx["player"]) else 0
     action_tax = policy["action_tax"] * (0.65 if mission == "SNIPE_CONTESTED" else 1.0)
     commitment_cost = ships * policy["commitment_cost_rate"]
     score = gain + timing_bonus + enemy_bonus - commitment_cost - action_tax - source_penalty - late_penalty - comet_penalty
-    return Candidate(source.id, target.id, int(ships), angle, eta, score, mission)
+    return Candidate(source_i, target_i, int(ships), angle, eta, score, mission)
 
 
 def validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350):
     valid = []
     for cand in candidates[:scan_limit]:
-        source = ctx["planet_by_id"].get(cand.source_id)
-        target = ctx["planet_by_id"].get(cand.target_id)
-        if source is None or target is None:
+        if cand.source_i >= len(ctx["planets"]) or cand.target_i >= len(ctx["planets"]):
             continue
-        if source.owner != ctx["player"]:
+        source = ctx["planets"][cand.source_i]
+        target = ctx["planets"][cand.target_i]
+        if ctx["p_owner"][cand.source_i] != ctx["player"]:
             continue
         if not path_is_reasonably_safe(source, target, cand.angle, cand.ships, cand.eta, ctx):
             continue
@@ -314,7 +336,7 @@ def validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350):
 def select_moves_greedy(candidates, ctx):
     policy = ctx["policy"]
     moves = []
-    budget = {p.id: source_available_ships(p, ctx) for p in ctx["my_planets"]}
+    budget = {i: source_available_ships(i, ctx) for i in ctx["my_idx"]}
     target_pressure = defaultdict(int)
     selected_intents = set()
     total_committed = 0
@@ -322,39 +344,38 @@ def select_moves_greedy(candidates, ctx):
         best = None
         best_score = policy["min_score"]
         for cand in candidates:
-            intent = (cand.source_id, cand.target_id, cand.mission)
-            if intent in selected_intents or cand.ships > budget.get(cand.source_id, 0):
+            intent = (cand.source_i, cand.target_i, cand.mission)
+            if intent in selected_intents or cand.ships > budget.get(cand.source_i, 0):
                 continue
             if total_committed + cand.ships > policy["max_total_commit"]:
                 continue
-            target = ctx["planet_by_id"].get(cand.target_id)
-            if target is None:
+            if cand.target_i >= len(ctx["p_ships"]):
                 continue
-            pressure_penalty = max(0, target_pressure[cand.target_id] - int(target.ships)) * 0.65
+            pressure_penalty = max(0, target_pressure[cand.target_i] - ctx["p_ships"][cand.target_i]) * 0.65
             score = cand.score - pressure_penalty
             if score > best_score:
                 best = cand
                 best_score = score
         if best is None:
             break
-        moves.append([best.source_id, best.angle, best.ships])
-        budget[best.source_id] -= best.ships
+        moves.append([ctx["p_id"][best.source_i], best.angle, best.ships])
+        budget[best.source_i] -= best.ships
         total_committed += best.ships
-        target_pressure[best.target_id] += best.ships
-        selected_intents.add((best.source_id, best.target_id, best.mission))
+        target_pressure[best.target_i] += best.ships
+        selected_intents.add((best.source_i, best.target_i, best.mission))
     return moves
 
 
-def cheap_forecast_target(target, turns, ctx):
-    owner = target.owner
-    ships = int(target.ships)
+def cheap_forecast_target(target_i, turns, ctx):
+    owner = ctx["p_owner"][target_i]
+    ships = ctx["p_ships"][target_i]
     last_t = 0
-    arrivals = [item for item in ctx["incoming"].get(target.id, []) if item["eta"] <= turns]
+    arrivals = [item for item in ctx["incoming"].get(target_i, []) if item["eta"] <= turns]
     arrivals.sort(key=lambda item: item["eta"])
     for fleet in arrivals:
         dt = fleet["eta"] - last_t
         if owner != -1:
-            ships += int(target.production) * max(0, dt)
+            ships += ctx["p_prod"][target_i] * max(0, dt)
         if fleet["owner"] == owner:
             ships += fleet["ships"]
         elif fleet["ships"] > ships:
@@ -364,7 +385,7 @@ def cheap_forecast_target(target, turns, ctx):
             ships -= fleet["ships"]
         last_t = fleet["eta"]
     if owner != -1:
-        ships += int(target.production) * max(0, turns - last_t)
+        ships += ctx["p_prod"][target_i] * max(0, turns - last_t)
     return owner, max(0, ships)
 
 
@@ -373,8 +394,8 @@ def rough_incoming_by_target(ctx):
     for fleet in ctx["fleets"]:
         hit = nearest_future_hit(fleet, ctx, max_turns=70)
         if hit is not None:
-            target, eta = hit
-            incoming[target.id].append({"eta": eta, "owner": fleet.owner, "ships": int(fleet.ships)})
+            target_i, eta = hit
+            incoming[target_i].append({"eta": eta, "owner": fleet.owner, "ships": int(fleet.ships)})
     for items in incoming.values():
         items.sort(key=lambda item: item["eta"])
     return incoming
@@ -400,31 +421,38 @@ def nearest_future_hit(fleet, ctx, max_turns=70):
 
 def threatened_planets(ctx):
     threats = []
-    for planet in ctx["my_planets"]:
+    for planet_i in ctx["my_idx"]:
         enemy_power = 0
         soonest = None
-        for fleet in ctx["incoming"].get(planet.id, []):
+        for fleet in ctx["incoming"].get(planet_i, []):
             if fleet["owner"] == ctx["player"]:
                 continue
             enemy_power += fleet["ships"]
             soonest = fleet["eta"] if soonest is None else min(soonest, fleet["eta"])
         if soonest is None:
             continue
-        projected = int(planet.ships) + int(planet.production) * soonest
+        projected = ctx["p_ships"][planet_i] + ctx["p_prod"][planet_i] * soonest
         if enemy_power > projected:
-            threats.append((planet, enemy_power - projected + 2, soonest))
+            threats.append((planet_i, enemy_power - projected + 2, soonest))
     threats.sort(key=lambda item: (item[2], -item[1]))
     return threats
 
 
-def estimate_arrival(source, target, ships, ctx):
-    turns = cheap_travel_time(source.x, source.y, source.radius, target, ships)
+def estimate_arrival(source_i, target_i, ships, ctx):
+    turns = cheap_travel_time_i(source_i, target_i, ships, ctx)
     for _ in range(2):
-        pos = future_planet_position(target, turns, ctx)
+        pos = future_planet_position_i(target_i, turns, ctx)
         if pos is None:
             break
-        proxy = target._replace(x=pos[0], y=pos[1])
-        next_turns = cheap_travel_time(source.x, source.y, source.radius, proxy, ships)
+        next_turns = cheap_travel_time_xy(
+            ctx["p_x"][source_i],
+            ctx["p_y"][source_i],
+            ctx["p_radius"][source_i],
+            pos[XY_X],
+            pos[XY_Y],
+            ctx["p_radius"][target_i],
+            ships,
+        )
         if abs(next_turns - turns) <= 1:
             turns = next_turns
             break
@@ -432,16 +460,28 @@ def estimate_arrival(source, target, ships, ctx):
     return max(1, turns)
 
 
-def cheap_travel_time(sx, sy, sr, target, ships):
-    travel = max(0.0, math.hypot(target.x - sx, target.y - sy) - sr - target.radius)
+def cheap_travel_time_i(source_i, target_i, ships, ctx):
+    return cheap_travel_time_xy(
+        ctx["p_x"][source_i],
+        ctx["p_y"][source_i],
+        ctx["p_radius"][source_i],
+        ctx["p_x"][target_i],
+        ctx["p_y"][target_i],
+        ctx["p_radius"][target_i],
+        ships,
+    )
+
+
+def cheap_travel_time_xy(sx, sy, sr, tx, ty, tr, ships):
+    travel = max(0.0, math.hypot(tx - sx, ty - sy) - sr - tr)
     return max(1, int(math.ceil(travel / fleet_speed(ships))))
 
 
-def aim_angle(source, target, eta, ctx):
-    pos = future_planet_position(target, eta, ctx)
+def aim_angle(source_i, target_i, eta, ctx):
+    pos = future_planet_position_i(target_i, eta, ctx)
     if pos is None:
-        pos = (target.x, target.y)
-    return math.atan2(pos[1] - source.y, pos[0] - source.x)
+        pos = (ctx["p_x"][target_i], ctx["p_y"][target_i])
+    return math.atan2(pos[XY_Y] - ctx["p_y"][source_i], pos[XY_X] - ctx["p_x"][source_i])
 
 
 def path_is_reasonably_safe(source, target, angle, ships, eta, ctx):
@@ -458,25 +498,25 @@ def path_is_reasonably_safe(source, target, angle, ships, eta, ctx):
             return False
         first_hit = first_planet_collision(prev_x, prev_y, x, y, turn, ctx)
         if first_hit is not None:
-            return first_hit.id == target.id
+            return ctx["p_id"][first_hit] == target.id
         prev_x, prev_y = x, y
     return False
 
 
 def first_planet_collision(ax, ay, bx, by, turn, ctx):
-    best_planet = None
+    best_planet_i = None
     best_t = None
-    for planet in ctx["planets"]:
-        pos = future_planet_position(planet, turn, ctx)
+    for planet_i in range(len(ctx["p_id"])):
+        pos = future_planet_position_i(planet_i, turn, ctx)
         if pos is None:
             continue
-        t = segment_circle_hit_fraction(pos[0], pos[1], planet.radius, ax, ay, bx, by)
+        t = segment_circle_hit_fraction(pos[XY_X], pos[XY_Y], ctx["p_radius"][planet_i], ax, ay, bx, by)
         if t is None:
             continue
         if best_t is None or t < best_t:
             best_t = t
-            best_planet = planet
-    return best_planet
+            best_planet_i = planet_i
+    return best_planet_i
 
 
 def segment_circle_hit_fraction(cx, cy, radius, ax, ay, bx, by):
@@ -501,28 +541,28 @@ def segment_circle_hit_fraction(cx, cy, radius, ax, ay, bx, by):
     return min(hits)
 
 
-def source_safety_penalty(source, ships, ctx):
-    remaining = int(source.ships) - ships
-    reserve_ships = reserve(source, ctx)
+def source_safety_penalty(source_i, ships, ctx):
+    remaining = ctx["p_ships"][source_i] - ships
+    reserve_ships = reserve(source_i, ctx)
     if remaining >= reserve_ships:
         return 0.0
     return (reserve_ships - remaining) * 2.2
 
 
-def source_available_ships(source, ctx):
-    reserve_available = max(0, int(source.ships) - reserve(source, ctx))
-    policy_cap = int(source.ships * ctx["policy"]["max_source_commit_fraction"])
+def source_available_ships(source_i, ctx):
+    reserve_available = max(0, ctx["p_ships"][source_i] - reserve(source_i, ctx))
+    policy_cap = int(ctx["p_ships"][source_i] * ctx["policy"]["max_source_commit_fraction"])
     return max(0, min(reserve_available, policy_cap))
 
 
-def reserve(source, ctx):
-    base = 3 + int(source.production) * 2
+def reserve(source_i, ctx):
+    base = 3 + ctx["p_prod"][source_i] * 2
     if ctx["step"] < 35:
         base += 3
-    for item in ctx["incoming"].get(source.id, []):
+    for item in ctx["incoming"].get(source_i, []):
         if item["owner"] != ctx["player"] and item["eta"] <= 12:
             base += item["ships"]
-    return min(int(source.ships), base)
+    return min(ctx["p_ships"][source_i], base)
 
 
 def unique_clamped(values, low, high):
@@ -539,14 +579,15 @@ def unique_clamped(values, low, high):
     return sorted(result)
 
 
-def future_planet_position(planet, turns, ctx):
-    if planet.id in ctx["comet_ids"]:
-        return future_comet_position(planet.id, turns, ctx)
-    initial = ctx["initial_by_id"].get(planet.id)
+def future_planet_position_i(planet_i, turns, ctx):
+    planet_id = ctx["p_id"][planet_i]
+    if planet_id in ctx["comet_ids"]:
+        return future_comet_position(planet_id, turns, ctx)
+    initial = ctx["initial_by_id"].get(planet_id)
     if initial is None or is_static_planet(initial):
-        return planet.x, planet.y
+        return ctx["p_x"][planet_i], ctx["p_y"][planet_i]
     radius = math.hypot(initial.x - CENTER, initial.y - CENTER)
-    current_angle = math.atan2(planet.y - CENTER, planet.x - CENTER)
+    current_angle = math.atan2(ctx["p_y"][planet_i] - CENTER, ctx["p_x"][planet_i] - CENTER)
     future_angle = current_angle + ctx["angular_velocity"] * turns
     return CENTER + radius * math.cos(future_angle), CENTER + radius * math.sin(future_angle)
 
@@ -602,5 +643,13 @@ def distance(a, b):
     return math.hypot(a.x - b.x, a.y - b.y)
 
 
+def distance_i(a_i, b_i, ctx):
+    return math.hypot(ctx["p_x"][a_i] - ctx["p_x"][b_i], ctx["p_y"][a_i] - ctx["p_y"][b_i])
+
+
 def distance_to_center(planet):
     return math.hypot(planet.x - CENTER, planet.y - CENTER)
+
+
+def distance_to_center_i(planet_i, ctx):
+    return math.hypot(ctx["p_x"][planet_i] - CENTER, ctx["p_y"][planet_i] - CENTER)
