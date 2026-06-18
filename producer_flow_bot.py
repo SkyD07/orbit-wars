@@ -1,5 +1,5 @@
 import math
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 
 
 BOARD_SIZE = 100.0
@@ -34,9 +34,6 @@ C_ANGLE = 3
 C_ETA = 4
 C_SCORE = 5
 C_MISSION = 6
-
-Planet = namedtuple("Planet", "id owner x y radius ships production")
-
 
 def read(obs, key, default=None):
     if isinstance(obs, dict):
@@ -84,8 +81,6 @@ def build_context(obs):
     raw_planets = read(obs, "planets", []) or []
     raw_fleets = read(obs, "fleets", []) or []
     raw_initial_planets = read(obs, "initial_planets", []) or []
-    planets = [Planet(*p) for p in raw_planets]
-    initial_planets = [Planet(*p) for p in raw_initial_planets]
     comet_ids = set(read(obs, "comet_planet_ids", []) or [])
     p_id = [int(p[P_ID]) for p in raw_planets]
     p_owner = [int(p[P_OWNER]) for p in raw_planets]
@@ -100,14 +95,23 @@ def build_context(obs):
     f_y = [float(f[F_Y]) for f in raw_fleets]
     f_angle = [float(f[F_ANGLE]) for f in raw_fleets]
     f_ships = [int(f[F_SHIPS]) for f in raw_fleets]
+    initial_x_by_id = {}
+    initial_y_by_id = {}
+    initial_static_by_id = {}
+    for p in raw_initial_planets:
+        pid = int(p[P_ID])
+        x = float(p[P_X])
+        y = float(p[P_Y])
+        radius = float(p[P_RADIUS])
+        initial_x_by_id[pid] = x
+        initial_y_by_id[pid] = y
+        initial_static_by_id[pid] = is_static_geometry(x, y, radius)
     ctx = {
         "player": player,
         "step": step,
         "remaining_steps": MAX_STEPS - step,
         "raw_planets": raw_planets,
         "raw_fleets": raw_fleets,
-        "planets": planets,
-        "planet_by_id": {p.id: p for p in planets},
         "p_id": p_id,
         "p_owner": p_owner,
         "p_x": p_x,
@@ -121,7 +125,9 @@ def build_context(obs):
         "f_y": f_y,
         "f_angle": f_angle,
         "f_ships": f_ships,
-        "initial_by_id": {p.id: p for p in initial_planets},
+        "initial_x_by_id": initial_x_by_id,
+        "initial_y_by_id": initial_y_by_id,
+        "initial_static_by_id": initial_static_by_id,
         "comets": read(obs, "comets", []) or [],
         "comet_ids": comet_ids,
         "angular_velocity": float(read(obs, "angular_velocity", 0.0) or 0.0),
@@ -614,10 +620,11 @@ def future_planet_position_i(planet_i, turns, ctx):
     planet_id = ctx["p_id"][planet_i]
     if planet_id in ctx["comet_ids"]:
         return future_comet_position(planet_id, turns, ctx)
-    initial = ctx["initial_by_id"].get(planet_id)
-    if initial is None or is_static_planet(initial):
+    initial_x = ctx["initial_x_by_id"].get(planet_id)
+    if initial_x is None or ctx["initial_static_by_id"].get(planet_id, True):
         return ctx["p_x"][planet_i], ctx["p_y"][planet_i]
-    radius = math.hypot(initial.x - CENTER, initial.y - CENTER)
+    initial_y = ctx["initial_y_by_id"][planet_id]
+    radius = math.hypot(initial_x - CENTER, initial_y - CENTER)
     current_angle = math.atan2(ctx["p_y"][planet_i] - CENTER, ctx["p_x"][planet_i] - CENTER)
     future_angle = current_angle + ctx["angular_velocity"] * turns
     return CENTER + radius * math.cos(future_angle), CENTER + radius * math.sin(future_angle)
@@ -655,8 +662,8 @@ def fleet_speed(ships):
     return 1.0 + (MAX_SPEED - 1.0) * (ratio**1.5)
 
 
-def is_static_planet(planet):
-    return math.hypot(planet.x - CENTER, planet.y - CENTER) + planet.radius >= 50.0
+def is_static_geometry(x, y, radius):
+    return math.hypot(x - CENTER, y - CENTER) + radius >= 50.0
 
 
 def point_segment_distance(px, py, ax, ay, bx, by):
@@ -670,16 +677,8 @@ def point_segment_distance(px, py, ax, ay, bx, by):
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
-def distance(a, b):
-    return math.hypot(a.x - b.x, a.y - b.y)
-
-
 def distance_i(a_i, b_i, ctx):
     return math.hypot(ctx["p_x"][a_i] - ctx["p_x"][b_i], ctx["p_y"][a_i] - ctx["p_y"][b_i])
-
-
-def distance_to_center(planet):
-    return math.hypot(planet.x - CENTER, planet.y - CENTER)
 
 
 def distance_to_center_i(planet_i, ctx):
