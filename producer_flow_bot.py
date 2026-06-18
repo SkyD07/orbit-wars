@@ -27,15 +27,38 @@ F_SHIPS = 6
 XY_X = 0
 XY_Y = 1
 
+C_SOURCE_I = 0
+C_TARGET_I = 1
+C_SHIPS = 2
+C_ANGLE = 3
+C_ETA = 4
+C_SCORE = 5
+C_MISSION = 6
+
 Planet = namedtuple("Planet", "id owner x y radius ships production")
 Fleet = namedtuple("Fleet", "id owner x y angle from_planet_id ships")
-Candidate = namedtuple("Candidate", "source_i target_i ships angle eta score mission")
 
 
 def read(obs, key, default=None):
     if isinstance(obs, dict):
         return obs.get(key, default)
     return getattr(obs, key, default)
+
+
+def make_candidate(source_i, target_i, ships, angle, eta, score, mission):
+    return (source_i, target_i, int(ships), angle, eta, score, mission)
+
+
+def candidate_with_score(candidate, score):
+    return (
+        candidate[C_SOURCE_I],
+        candidate[C_TARGET_I],
+        candidate[C_SHIPS],
+        candidate[C_ANGLE],
+        candidate[C_ETA],
+        score,
+        candidate[C_MISSION],
+    )
 
 
 def agent(obs, config=None):
@@ -50,8 +73,8 @@ def agent(obs, config=None):
     candidates.extend(gen_attack_candidates(ctx))
     candidates.extend(gen_endgame_candidates(ctx))
 
-    candidates = [cand for cand in candidates if cand.score > ctx["policy"]["min_score"] - 25]
-    candidates.sort(key=lambda cand: cand.score, reverse=True)
+    candidates = [cand for cand in candidates if cand[C_SCORE] > ctx["policy"]["min_score"] - 25]
+    candidates.sort(key=lambda cand: cand[C_SCORE], reverse=True)
     candidates = validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350)
     return select_moves_greedy(candidates, ctx)
 
@@ -171,9 +194,14 @@ def gen_snipe_candidates(ctx):
                 cand = score_move(source, target_i, ships, ctx, "SNIPE_CONTESTED")
                 if not cand:
                     continue
-                if cand.eta < enemy_eta + 1 or cand.eta > enemy_eta + 4:
+                if cand[C_ETA] < enemy_eta + 1 or cand[C_ETA] > enemy_eta + 4:
                     continue
-                candidates.append(cand._replace(score=cand.score + 18 + max(0, 5 - abs(cand.eta - enemy_eta - 2)) * 3))
+                candidates.append(
+                    candidate_with_score(
+                        cand,
+                        cand[C_SCORE] + 18 + max(0, 5 - abs(cand[C_ETA] - enemy_eta - 2)) * 3,
+                    )
+                )
     return candidates
 
 
@@ -204,7 +232,7 @@ def gen_defense_candidates(ctx):
                     - ships * policy["commitment_cost_rate"]
                     - policy["action_tax"] * 0.5
                 )
-                candidates.append(Candidate(source_i, target_i, ships, angle, arrival, score, "REINFORCE_THREATENED"))
+                candidates.append(make_candidate(source_i, target_i, ships, angle, arrival, score, "REINFORCE_THREATENED"))
     return candidates
 
 
@@ -221,7 +249,7 @@ def gen_endgame_candidates(ctx):
             ships = min(available, max(1, ctx["p_ships"][target_i] + 1))
             cand = score_move(source_i, target_i, ships, ctx, "ENDGAME_SCORE_DUMP")
             if cand:
-                candidates.append(cand._replace(score=cand.score + ships * 0.25))
+                candidates.append(candidate_with_score(cand, cand[C_SCORE] + ships * 0.25))
     return candidates
 
 
@@ -313,19 +341,19 @@ def score_move(source_i, target_i, ships, ctx, mission):
     action_tax = policy["action_tax"] * (0.65 if mission == "SNIPE_CONTESTED" else 1.0)
     commitment_cost = ships * policy["commitment_cost_rate"]
     score = gain + timing_bonus + enemy_bonus - commitment_cost - action_tax - source_penalty - late_penalty - comet_penalty
-    return Candidate(source_i, target_i, int(ships), angle, eta, score, mission)
+    return make_candidate(source_i, target_i, ships, angle, eta, score, mission)
 
 
 def validate_top_candidates(candidates, ctx, valid_limit=80, scan_limit=350):
     valid = []
     for cand in candidates[:scan_limit]:
-        if cand.source_i >= len(ctx["planets"]) or cand.target_i >= len(ctx["planets"]):
+        if cand[C_SOURCE_I] >= len(ctx["planets"]) or cand[C_TARGET_I] >= len(ctx["planets"]):
             continue
-        source = ctx["planets"][cand.source_i]
-        target = ctx["planets"][cand.target_i]
-        if ctx["p_owner"][cand.source_i] != ctx["player"]:
+        source = ctx["planets"][cand[C_SOURCE_I]]
+        target = ctx["planets"][cand[C_TARGET_I]]
+        if ctx["p_owner"][cand[C_SOURCE_I]] != ctx["player"]:
             continue
-        if not path_is_reasonably_safe(source, target, cand.angle, cand.ships, cand.eta, ctx):
+        if not path_is_reasonably_safe(source, target, cand[C_ANGLE], cand[C_SHIPS], cand[C_ETA], ctx):
             continue
         valid.append(cand)
         if len(valid) >= valid_limit:
@@ -344,25 +372,25 @@ def select_moves_greedy(candidates, ctx):
         best = None
         best_score = policy["min_score"]
         for cand in candidates:
-            intent = (cand.source_i, cand.target_i, cand.mission)
-            if intent in selected_intents or cand.ships > budget.get(cand.source_i, 0):
+            intent = (cand[C_SOURCE_I], cand[C_TARGET_I], cand[C_MISSION])
+            if intent in selected_intents or cand[C_SHIPS] > budget.get(cand[C_SOURCE_I], 0):
                 continue
-            if total_committed + cand.ships > policy["max_total_commit"]:
+            if total_committed + cand[C_SHIPS] > policy["max_total_commit"]:
                 continue
-            if cand.target_i >= len(ctx["p_ships"]):
+            if cand[C_TARGET_I] >= len(ctx["p_ships"]):
                 continue
-            pressure_penalty = max(0, target_pressure[cand.target_i] - ctx["p_ships"][cand.target_i]) * 0.65
-            score = cand.score - pressure_penalty
+            pressure_penalty = max(0, target_pressure[cand[C_TARGET_I]] - ctx["p_ships"][cand[C_TARGET_I]]) * 0.65
+            score = cand[C_SCORE] - pressure_penalty
             if score > best_score:
                 best = cand
                 best_score = score
         if best is None:
             break
-        moves.append([ctx["p_id"][best.source_i], best.angle, best.ships])
-        budget[best.source_i] -= best.ships
-        total_committed += best.ships
-        target_pressure[best.target_i] += best.ships
-        selected_intents.add((best.source_i, best.target_i, best.mission))
+        moves.append([ctx["p_id"][best[C_SOURCE_I]], best[C_ANGLE], best[C_SHIPS]])
+        budget[best[C_SOURCE_I]] -= best[C_SHIPS]
+        total_committed += best[C_SHIPS]
+        target_pressure[best[C_TARGET_I]] += best[C_SHIPS]
+        selected_intents.add((best[C_SOURCE_I], best[C_TARGET_I], best[C_MISSION]))
     return moves
 
 
