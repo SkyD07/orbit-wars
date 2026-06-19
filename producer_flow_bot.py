@@ -133,6 +133,7 @@ def build_context(obs):
     ctx["enemy_idx"] = [i for i, owner in enumerate(p_owner) if owner not in (-1, player)]
     ctx["neutral_idx"] = [i for i, owner in enumerate(p_owner) if owner == -1]
     ctx["enemy_fleet_idx"] = [i for i, owner in enumerate(f_owner) if owner != player]
+    ctx["neutral_intrinsic_score"] = [prod * 12.0 - (ships + 1) for prod, ships in zip(p_prod, p_ships)]
     ctx["incoming"] = rough_incoming_by_target(ctx)
     ctx["policy"] = build_strategy_policy(ctx)
     return ctx
@@ -157,7 +158,7 @@ def build_strategy_policy(ctx):
 def gen_capture_candidates(ctx):
     candidates = []
     for source_i in usable_sources(ctx):
-        targets = candidate_targets_for_source(source_i, ctx["neutral_idx"], global_limit=14, ctx=ctx)
+        targets = neutral_targets_for_source(source_i, ctx, limit=10)
         for target_i in targets:
             for ships in ship_buckets(source_i, target_i, ctx):
                 cand = score_move(source_i, target_i, ships, ctx, "CAPTURE_NEUTRAL")
@@ -293,6 +294,16 @@ def candidate_targets_for_source(source_i, targets, global_limit, ctx):
         )[:5]
     )
     return selected
+
+
+def neutral_targets_for_source(source_i, ctx, limit=10):
+    return sorted(
+        ctx["neutral_idx"],
+        key=lambda i: (
+            -(ctx["neutral_intrinsic_score"][i] - distance_i(source_i, i, ctx) * 0.35),
+            ctx["p_id"][i],
+        ),
+    )[:limit]
 
 
 def ship_buckets(source_i, target_i, ctx):
