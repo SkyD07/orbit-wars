@@ -7,6 +7,7 @@ CENTER = 50.0
 SUN_RADIUS = 10.0
 MAX_SPEED = 6.0
 MAX_STEPS = 500
+STAT_HORIZON = 12
 
 P_ID = 0
 P_OWNER = 1
@@ -136,6 +137,7 @@ def build_context(obs):
     ctx["neutral_intrinsic_score"] = [prod * 12.0 - (ships + 1) for prod, ships in zip(p_prod, p_ships)]
     ctx["incoming"] = rough_incoming_by_target(ctx)
     ctx["policy"] = build_strategy_policy(ctx)
+    build_statistical_state(ctx)
     return ctx
 
 
@@ -153,6 +155,103 @@ def build_strategy_policy(ctx):
         "max_total_commit_fraction": 0.35,
         "max_total_commit": max(12, int(owned_stock * 0.35)),
     }
+
+
+def build_statistical_state(ctx):
+    planet_count = len(ctx["p_id"])
+    safety_floor = [0] * planet_count
+    minimum_margin = [0] * planet_count
+    reinforcement_demand = [0] * planet_count
+    donor_capacity = [0] * planet_count
+    pressure_eta = [0] * planet_count
+
+    for planet_i in ctx["my_idx"]:
+        floor = 3 + ctx["p_prod"][planet_i] * 2 + (3 if ctx["step"] < 35 else 0)
+        safety_floor[planet_i] = floor
+        balance = ctx["p_ships"][planet_i]
+        min_margin = balance - floor
+        last_eta = 0
+        has_enemy_pressure = False
+        breach_eta = 0
+        for event in ctx["incoming"].get(planet_i, []):
+            eta = event["eta"]
+            if eta > STAT_HORIZON:
+                break
+            balance += ctx["p_prod"][planet_i] * max(0, eta - last_eta)
+            if event["owner"] == ctx["player"]:
+                balance += event["ships"]
+            else:
+                balance -= event["ships"]
+                has_enemy_pressure = True
+            margin = balance - floor
+            if margin < min_margin:
+                min_margin = margin
+                if margin < 0 and breach_eta == 0:
+                    breach_eta = eta
+            last_eta = eta
+
+        minimum_margin[planet_i] = min_margin
+        demand = max(0, -min_margin) if has_enemy_pressure else 0
+        reinforcement_demand[planet_i] = demand
+        pressure_eta[planet_i] = breach_eta
+        reserve_available = max(0, min_margin)
+        policy_cap = int(ctx["p_ships"][planet_i] * ctx["policy"]["max_source_commit_fraction"])
+        donor_capacity[planet_i] = min(reserve_available, policy_cap)
+
+    reach_weight = [[0.0] * planet_count for _ in range(planet_count)]
+    friendly_support_influence = [0.0] * planet_count
+    best_friendly_eta = [STAT_HORIZON + 1] * planet_count
+    for source_i in ctx["my_idx"]:
+        available = donor_capacity[source_i]
+        if available <= 0:
+            continue
+        probe_ships = max(1, available)
+        for target_i in range(planet_count):
+            if target_i == source_i:
+                continue
+            eta = cheap_travel_time_i(source_i, target_i, probe_ships, ctx)
+            weight = 1.0 / (1.0 + eta * eta)
+            reach_weight[source_i][target_i] = weight
+            friendly_support_influence[target_i] += available * weight
+            if eta < best_friendly_eta[target_i]:
+                best_friendly_eta[target_i] = eta
+
+    exposure = [0.0] * planet_count
+    front_relevance = [0.0] * planet_count
+    for planet_i in ctx["my_idx"]:
+        exposure[planet_i] = reinforcement_demand[planet_i] / (
+            1.0 + friendly_support_influence[planet_i]
+        )
+    for target_i in ctx["enemy_idx"] + ctx["neutral_idx"]:
+        if ctx["p_owner"][target_i] == -1:
+            opportunity = max(0.0, ctx["neutral_intrinsic_score"][target_i])
+        else:
+            opportunity = max(0.0, ctx["p_prod"][target_i] * 5.0 + 20.0 - (ctx["p_ships"][target_i] + 1))
+        eta = best_friendly_eta[target_i]
+        resistance = max(1.0, ctx["p_ships"][target_i] + ctx["p_prod"][target_i] * eta)
+        feasibility = min(1.0, friendly_support_influence[target_i] / resistance)
+        front_relevance[target_i] = opportunity * feasibility
+
+    support_hub_score = [0.0] * planet_count
+    for source_i in ctx["my_idx"]:
+        if donor_capacity[source_i] <= 0:
+            continue
+        opportunity_reach = 0.0
+        for target_i in ctx["enemy_idx"] + ctx["neutral_idx"]:
+            opportunity_reach += reach_weight[source_i][target_i] * front_relevance[target_i]
+        safety_factor = 1.0 / (1.0 + exposure[source_i])
+        support_hub_score[source_i] = donor_capacity[source_i] * opportunity_reach * safety_factor
+
+    ctx["safety_floor"] = safety_floor
+    ctx["minimum_margin"] = minimum_margin
+    ctx["reinforcement_demand"] = reinforcement_demand
+    ctx["donor_capacity"] = donor_capacity
+    ctx["pressure_eta"] = pressure_eta
+    ctx["friendly_reach_weight"] = reach_weight
+    ctx["friendly_support_influence"] = friendly_support_influence
+    ctx["exposure"] = exposure
+    ctx["front_relevance"] = front_relevance
+    ctx["support_hub_score"] = support_hub_score
 
 
 def gen_capture_candidates(ctx):
@@ -233,10 +332,12 @@ def gen_defense_candidates(ctx):
                     continue
                 angle = aim_angle(source_i, target_i, arrival, ctx)
                 policy = ctx["policy"]
+                support_efficiency = min(ships, need) * 3.0 / (1.0 + arrival)
                 score = (
                     60
                     + need * 0.8
                     + ctx["p_prod"][target_i] * max(0, ctx["remaining_steps"] - arrival) * 0.25
+                    + support_efficiency
                     - ships * policy["commitment_cost_rate"]
                     - policy["action_tax"] * 0.5
                 )
@@ -263,8 +364,13 @@ def gen_endgame_candidates(ctx):
 
 def usable_sources(ctx):
     return sorted(
-        (i for i in ctx["my_idx"] if ctx["p_ships"][i] > reserve(i, ctx) + 1),
-        key=lambda i: (-ctx["p_ships"][i], -ctx["p_prod"][i], ctx["p_id"][i]),
+        (i for i in ctx["my_idx"] if ctx["donor_capacity"][i] > 0),
+        key=lambda i: (
+            -ctx["donor_capacity"][i],
+            -ctx["support_hub_score"][i],
+            -ctx["p_prod"][i],
+            ctx["p_id"][i],
+        ),
     )
 
 
@@ -465,21 +571,12 @@ def nearest_future_hit(fleet_i, ctx, max_turns=70):
 
 
 def threatened_planets(ctx):
-    threats = []
-    for planet_i in ctx["my_idx"]:
-        enemy_power = 0
-        soonest = None
-        for fleet in ctx["incoming"].get(planet_i, []):
-            if fleet["owner"] == ctx["player"]:
-                continue
-            enemy_power += fleet["ships"]
-            soonest = fleet["eta"] if soonest is None else min(soonest, fleet["eta"])
-        if soonest is None:
-            continue
-        projected = ctx["p_ships"][planet_i] + ctx["p_prod"][planet_i] * soonest
-        if enemy_power > projected:
-            threats.append((planet_i, enemy_power - projected + 2, soonest))
-    threats.sort(key=lambda item: (item[2], -item[1]))
+    threats = [
+        (planet_i, ctx["reinforcement_demand"][planet_i], max(1, ctx["pressure_eta"][planet_i]))
+        for planet_i in ctx["my_idx"]
+        if ctx["reinforcement_demand"][planet_i] > 0
+    ]
+    threats.sort(key=lambda item: (item[2], -ctx["exposure"][item[0]], -item[1]))
     return threats
 
 
@@ -595,19 +692,11 @@ def source_safety_penalty(source_i, ships, ctx):
 
 
 def source_available_ships(source_i, ctx):
-    reserve_available = max(0, ctx["p_ships"][source_i] - reserve(source_i, ctx))
-    policy_cap = int(ctx["p_ships"][source_i] * ctx["policy"]["max_source_commit_fraction"])
-    return max(0, min(reserve_available, policy_cap))
+    return ctx["donor_capacity"][source_i]
 
 
 def reserve(source_i, ctx):
-    base = 3 + ctx["p_prod"][source_i] * 2
-    if ctx["step"] < 35:
-        base += 3
-    for item in ctx["incoming"].get(source_i, []):
-        if item["owner"] != ctx["player"] and item["eta"] <= 12:
-            base += item["ships"]
-    return min(ctx["p_ships"][source_i], base)
+    return ctx["p_ships"][source_i] - ctx["donor_capacity"][source_i]
 
 
 def unique_clamped(values, low, high):
