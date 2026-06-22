@@ -48,7 +48,7 @@ def make_candidate(source_i, target_i, ships, angle, eta, score, mission):
     return (source_i, target_i, int(ships), angle, eta, score, mission)
 
 
-def agent(obs, config=None):
+def _agent_impl(obs, config=None):
     ctx = build_context(obs)
     if not ctx["my_idx"]:
         return []
@@ -792,3 +792,7 @@ def point_segment_distance(px, py, ax, ay, bx, by):
 
 def distance_i(a_i, b_i, ctx):
     return math.hypot(ctx["p_x"][a_i] - ctx["p_x"][b_i], ctx["p_y"][a_i] - ctx["p_y"][b_i])
+
+
+def agent(obs, config=None):
+    return _agent_impl(obs, config)
