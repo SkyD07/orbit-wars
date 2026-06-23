@@ -1,5 +1,6 @@
 import math
 from collections import defaultdict
+from functools import lru_cache
 
 
 BOARD_SIZE = 100.0
@@ -9,7 +10,9 @@ MAX_SPEED = 6.0
 MAX_STEPS = 500
 STAT_HORIZON = 12
 FLOW_HORIZON = 20
-FLOW_TARGET_LIMIT = 8
+
+_FLEET_HIT_CACHE = {}
+_CACHE_LAST_STEP = -1
 
 P_ID = 0
 P_OWNER = 1
@@ -90,6 +93,11 @@ def build_context(obs):
         radius = float(p[P_RADIUS])
         initial_orbit_radius_by_id[pid] = math.hypot(x - CENTER, y - CENTER)
         initial_static_by_id[pid] = is_static_geometry(x, y, radius)
+    comet_geometry = {}
+    for group in read(obs, "comets", []) or []:
+        path_index = int(group.get("path_index", 0) or 0)
+        for planet_id, path in zip(group.get("planet_ids", []), group.get("paths", [])):
+            comet_geometry[int(planet_id)] = (path, path_index)
     ctx = {
         "player": player,
         "step": step,
@@ -108,10 +116,13 @@ def build_context(obs):
         "f_angle": f_angle,
         "f_from": f_from,
         "f_ships": f_ships,
+        "p_index_by_id": {planet_id: i for i, planet_id in enumerate(p_id)},
         "initial_orbit_radius_by_id": initial_orbit_radius_by_id,
         "initial_static_by_id": initial_static_by_id,
         "comets": read(obs, "comets", []) or [],
         "comet_ids": comet_ids,
+        "comet_geometry": comet_geometry,
+        "position_cache": {},
         "angular_velocity": float(read(obs, "angular_velocity", 0.0) or 0.0),
     }
     ctx["my_idx"] = [i for i, owner in enumerate(p_owner) if owner == player]
@@ -256,14 +267,7 @@ def generate_unified_flow_candidates(ctx):
             -ctx["reinforcement_demand"][i],
         ),
     )
-    pressure_targets = sorted(
-        ctx["enemy_idx"] + ctx["neutral_idx"],
-        key=lambda i: (
-            -ctx["front_relevance"][i],
-            -target_intrinsic_value(i, ctx),
-            ctx["p_id"][i],
-        ),
-    )[:FLOW_TARGET_LIMIT]
+    pressure_targets = ctx["enemy_idx"] + ctx["neutral_idx"]
 
     for source_i in sources:
         for target_i in friendly_demands[:8]:
@@ -339,7 +343,9 @@ def build_pressure_flow_candidate(source_i, target_i, ctx):
         return None
 
     projected_eta = estimate_arrival(source_i, target_i, max(1, available), ctx)
-    _, projected_ships = cheap_forecast_target(target_i, projected_eta, ctx)
+    projected_owner, projected_ships = cheap_forecast_target(target_i, projected_eta, ctx)
+    if projected_owner == ctx["player"]:
+        return None
     required = max(1, int(projected_ships) + 1)
     first_sizes = unique_clamped(
         [
@@ -580,9 +586,28 @@ def cheap_forecast_target(target_i, turns, ctx):
 
 
 def rough_incoming_by_target(ctx):
+    _prepare_fleet_hit_cache(ctx)
     incoming = defaultdict(list)
     for fleet_i in range(len(ctx["f_owner"])):
-        hit = nearest_future_hit(fleet_i, ctx, max_turns=70)
+        fleet_id = ctx["f_id"][fleet_i]
+        cached = _FLEET_HIT_CACHE.get(fleet_id)
+        hit = None
+        if cached is not None:
+            target_id, absolute_hit_step = cached
+            eta = absolute_hit_step - ctx["step"]
+            target_i = ctx["p_index_by_id"].get(target_id)
+            if eta > 0 and target_i is not None:
+                hit = (target_i, eta)
+            else:
+                _FLEET_HIT_CACHE.pop(fleet_id, None)
+        if hit is None:
+            hit = nearest_future_hit(fleet_i, ctx, max_turns=70)
+            if hit is not None:
+                target_i, eta = hit
+                _FLEET_HIT_CACHE[fleet_id] = (
+                    ctx["p_id"][target_i],
+                    ctx["step"] + eta,
+                )
         if hit is not None:
             target_i, eta = hit
             incoming[target_i].append({"eta": eta, "owner": ctx["f_owner"][fleet_i], "ships": ctx["f_ships"][fleet_i]})
@@ -591,15 +616,31 @@ def rough_incoming_by_target(ctx):
     return incoming
 
 
+def _prepare_fleet_hit_cache(ctx):
+    global _CACHE_LAST_STEP
+    step = ctx["step"]
+    if step < _CACHE_LAST_STEP or (step == 0 and _CACHE_LAST_STEP > 0):
+        _FLEET_HIT_CACHE.clear()
+    _CACHE_LAST_STEP = step
+
+    active_ids = set(ctx["f_id"])
+    if len(_FLEET_HIT_CACHE) > len(active_ids) + 12:
+        stale_ids = [fleet_id for fleet_id in _FLEET_HIT_CACHE if fleet_id not in active_ids]
+        for fleet_id in stale_ids:
+            _FLEET_HIT_CACHE.pop(fleet_id, None)
+
+
 def nearest_future_hit(fleet_i, ctx, max_turns=70):
     speed = fleet_speed(ctx["f_ships"][fleet_i])
     x = ctx["f_x"][fleet_i]
     y = ctx["f_y"][fleet_i]
     angle = ctx["f_angle"][fleet_i]
+    velocity_x = math.cos(angle) * speed
+    velocity_y = math.sin(angle) * speed
     for turn in range(1, max_turns + 1):
         prev_x, prev_y = x, y
-        x += math.cos(angle) * speed
-        y += math.sin(angle) * speed
+        x += velocity_x
+        y += velocity_y
         if x < 0 or x > BOARD_SIZE or y < 0 or y > BOARD_SIZE:
             return None
         if point_segment_distance(CENTER, CENTER, prev_x, prev_y, x, y) <= SUN_RADIUS:
@@ -678,17 +719,37 @@ def path_is_reasonably_safe(source_i, target_i, angle, ships, eta, ctx):
 def first_planet_collision(ax, ay, bx, by, turn, ctx):
     best_planet_i = None
     best_t = None
-    for planet_i in range(len(ctx["p_id"])):
-        pos = future_planet_position_i(planet_i, turn, ctx)
+    positions = planet_positions_at(turn, ctx)
+    min_x = min(ax, bx)
+    max_x = max(ax, bx)
+    min_y = min(ay, by)
+    max_y = max(ay, by)
+    for planet_i, pos in enumerate(positions):
         if pos is None:
             continue
-        t = segment_circle_hit_fraction(pos[XY_X], pos[XY_Y], ctx["p_radius"][planet_i], ax, ay, bx, by)
+        radius = ctx["p_radius"][planet_i]
+        px = pos[XY_X]
+        py = pos[XY_Y]
+        if px + radius < min_x or px - radius > max_x or py + radius < min_y or py - radius > max_y:
+            continue
+        t = segment_circle_hit_fraction(px, py, radius, ax, ay, bx, by)
         if t is None:
             continue
         if best_t is None or t < best_t:
             best_t = t
             best_planet_i = planet_i
     return best_planet_i
+
+
+def planet_positions_at(turn, ctx):
+    positions = ctx["position_cache"].get(turn)
+    if positions is None:
+        positions = tuple(
+            future_planet_position_i(planet_i, turn, ctx)
+            for planet_i in range(len(ctx["p_id"]))
+        )
+        ctx["position_cache"][turn] = positions
+    return positions
 
 
 def segment_circle_hit_fraction(cx, cy, radius, ax, ay, bx, by):
@@ -744,29 +805,24 @@ def future_planet_position_i(planet_i, turns, ctx):
 
 
 def future_comet_position(planet_id, turns, ctx):
-    for group in ctx["comets"]:
-        planet_ids = group.get("planet_ids", [])
-        if planet_id not in planet_ids:
-            continue
-        index = planet_ids.index(planet_id)
-        path = group.get("paths", [])[index]
-        path_index = int(group.get("path_index", 0) or 0) + int(turns)
+    geometry = ctx["comet_geometry"].get(planet_id)
+    if geometry is not None:
+        path, current_index = geometry
+        path_index = current_index + int(turns)
         if 0 <= path_index < len(path):
             return path[path_index][XY_X], path[path_index][XY_Y]
-        return None
     return None
 
 
 def comet_remaining_life(planet_id, ctx):
-    for group in ctx["comets"]:
-        planet_ids = group.get("planet_ids", [])
-        if planet_id not in planet_ids:
-            continue
-        path = group.get("paths", [])[planet_ids.index(planet_id)]
-        return max(0, len(path) - int(group.get("path_index", 0) or 0))
+    geometry = ctx["comet_geometry"].get(planet_id)
+    if geometry is not None:
+        path, current_index = geometry
+        return max(0, len(path) - current_index)
     return 0
 
 
+@lru_cache(maxsize=2048)
 def fleet_speed(ships):
     if ships <= 1:
         return 1.0
